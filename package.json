@@ -1,0 +1,40 @@
+{
+  "name": "codex-quota",
+  "version": "1.0.1",
+  "description": "Multi-account manager for OpenAI Codex CLI and OpenCode with OAuth browser authentication",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shuv1337/codex-quota.git"
+  },
+  "homepage": "https://github.com/shuv1337/codex-quota#readme",
+  "bugs": {
+    "url": "https://github.com/shuv1337/codex-quota/issues"
+  },
+  "files": [
+    "codex-quota.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "codex-usage": "./codex-quota.js",
+    "codex-quota": "./codex-quota.js"
+  },
+  "scripts": {
+    "start": "node codex-quota.js",
+    "test": "bun test",
+    "preflight": "node scripts/preflight.js",
+    "release:patch": "bun pm version patch",
+    "release:minor": "bun pm version minor",
+    "release:major": "bun pm version major",
+    "release:pack": "bun pm pack --dry-run",
+    "release:publish": "bun publish --access public"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}
