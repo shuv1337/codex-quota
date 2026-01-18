@@ -613,7 +613,51 @@ function printBar(remaining, width = 20) {
 	return `[${bar}]`;
 }
 
-function printAccountUsage(account, payload) {
+// Box drawing characters
+const BOX = {
+	topLeft: "╭",
+	topRight: "╮",
+	bottomLeft: "╰",
+	bottomRight: "╯",
+	horizontal: "─",
+	vertical: "│",
+};
+
+/**
+ * Draw a box around content lines
+ * @param {string[]} lines - Lines to display inside the box
+ * @param {number} minWidth - Minimum box width (default 70)
+ * @returns {string[]} Lines with box characters
+ */
+function drawBox(lines, minWidth = 70) {
+	// Calculate content width (max line length)
+	const contentWidth = Math.max(minWidth, ...lines.map(l => l.length)) + 2;
+	
+	const output = [];
+	
+	// Top border
+	output.push(BOX.topLeft + BOX.horizontal.repeat(contentWidth) + BOX.topRight);
+	
+	// Content lines with padding
+	for (const line of lines) {
+		const padding = contentWidth - line.length - 1;
+		output.push(BOX.vertical + " " + line + " ".repeat(padding) + BOX.vertical);
+	}
+	
+	// Bottom border
+	output.push(BOX.bottomLeft + BOX.horizontal.repeat(contentWidth) + BOX.bottomRight);
+	
+	return output;
+}
+
+/**
+ * Build usage lines for an account (for box display)
+ * @param {object} account - Account object
+ * @param {object} payload - Usage payload from API
+ * @returns {string[]} Lines to display
+ */
+function buildAccountUsageLines(account, payload) {
+	const lines = [];
 	const usage = payload?.usage ?? payload;
 	const rateLimit = usage?.rate_limit;
 	const primaryWindow = rateLimit?.primary_window ?? usage?.primary ?? usage?.session ?? usage?.fiveHour;
@@ -623,15 +667,17 @@ function printAccountUsage(account, payload) {
 	
 	// Extract profile info from token
 	const profile = extractProfile(account.access);
+	const planType = usage?.plan_type ?? profile.planType;
+	const planDisplay = planType ? ` (${planType})` : "";
 	
-	// Header with label and email
+	// Header: label <email> (plan)
 	const emailDisplay = profile.email ? ` <${profile.email}>` : "";
-	console.log(`\n${account.label}${emailDisplay}`);
-	console.log(`  Account: ${account.accountId.slice(0, 8)}...`);
+	lines.push(`${account.label}${emailDisplay}${planDisplay}`);
+	lines.push("");
 	
 	if (payload.error) {
-		console.log(`  Error: ${payload.error}`);
-		return;
+		lines.push(`Error: ${payload.error}`);
+		return lines;
 	}
 	
 	// 5h limit bar (session/primary window)
@@ -639,7 +685,7 @@ function printAccountUsage(account, payload) {
 		const remaining = session.remaining ?? (session.used !== undefined ? 100 - session.used : null);
 		if (remaining !== null) {
 			const reset = session.resetAfterSeconds ? formatResetTime(session.resetAfterSeconds, "inline") : "";
-			console.log(`  5h limit:     ${printBar(remaining)} ${Math.round(remaining)}% left ${reset}`);
+			lines.push(`5h limit:     ${printBar(remaining)} ${Math.round(remaining)}% left ${reset}`);
 		}
 	}
 	
@@ -648,15 +694,11 @@ function printAccountUsage(account, payload) {
 		const remaining = weekly.remaining ?? (weekly.used !== undefined ? 100 - weekly.used : null);
 		if (remaining !== null) {
 			const reset = weekly.resetAfterSeconds ? formatResetTime(weekly.resetAfterSeconds, "inline") : "";
-			console.log(`  Weekly limit: ${printBar(remaining)} ${Math.round(remaining)}% left ${reset}`);
+			lines.push(`Weekly limit: ${printBar(remaining)} ${Math.round(remaining)}% left ${reset}`);
 		}
 	}
 	
-	// Show plan type if available
-	const planType = usage?.plan_type;
-	if (planType) {
-		console.log(`  Plan: ${planType}`);
-	}
+	return lines;
 }
 
 function printHelp() {
@@ -2144,14 +2186,11 @@ async function handleQuota(args, flags) {
 		return;
 	}
 	
-	console.log(`Codex Quota - ${results.length} account(s)`);
-	console.log("─".repeat(40));
-	
 	for (const { account, usage } of results) {
-		printAccountUsage(account, usage);
+		const lines = buildAccountUsageLines(account, usage);
+		const boxLines = drawBox(lines);
+		console.log(boxLines.join("\n"));
 	}
-	
-	console.log("");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
