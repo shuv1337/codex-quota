@@ -17,7 +17,7 @@
     "LICENSE"
   ],
   "bin": {
-    "codex-usage": "./codex-quota.js",
+    "cq": "./codex-quota.js",
     "codex-quota": "./codex-quota.js"
   },
   "scripts": {

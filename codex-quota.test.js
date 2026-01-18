@@ -38,7 +38,6 @@ import {
 	MULTI_ACCOUNT_PATHS,
 	CODEX_CLI_AUTH_PATH,
 	PRIMARY_CMD,
-	ALIAS_CMD,
 	printHelp,
 	printHelpAdd,
 	printHelpSwitch,
@@ -89,12 +88,6 @@ describe("PRIMARY_CMD constant", () => {
 	});
 });
 
-describe("ALIAS_CMD constant", () => {
-	test("equals 'codex-usage'", () => {
-		expect(ALIAS_CMD).toBe("codex-usage");
-	});
-});
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Help output tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -127,15 +120,6 @@ describe("help output", () => {
 		expect(output).toMatch(/^codex-quota/);
 	});
 
-	test("main help mentions 'codex-usage' as backward-compatible alias", () => {
-		printHelp();
-		const output = consoleOutput.join("\n");
-		
-		// Should mention codex-usage in aliases section
-		expect(output).toContain("codex-usage");
-		expect(output).toContain("backward compatibility");
-	});
-
 	test("all subcommand help contains 'codex-quota'", () => {
 		const helpFunctions = [printHelpAdd, printHelpSwitch, printHelpList, printHelpRemove, printHelpQuota];
 		
@@ -149,20 +133,6 @@ describe("help output", () => {
 		}
 	});
 
-	test("subcommand help does not use 'codex-usage' as primary", () => {
-		const helpFunctions = [printHelpAdd, printHelpSwitch, printHelpList, printHelpRemove, printHelpQuota];
-		
-		for (const helpFn of helpFunctions) {
-			consoleOutput = [];
-			helpFn();
-			const output = consoleOutput.join("\n");
-			
-			// Should not have codex-usage in Usage: lines or Examples:
-			// The only place codex-usage should appear is in references to backward compat
-			const usageMatches = output.match(/^Usage:.*codex-usage/m);
-			expect(usageMatches).toBeNull();
-		}
-	});
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -173,7 +143,7 @@ describe("error messages", () => {
 	test("do not hardcode codex-usage", () => {
 		const source = readFileSync(join(import.meta.dir, "codex-quota.js"), "utf-8");
 		const matches = source.match(/codex-usage/g) ?? [];
-		expect(matches.length).toBe(1);
+		expect(matches.length).toBe(0);
 	});
 });
 
@@ -209,9 +179,9 @@ describe("package.json metadata", () => {
 		expect(pkg.bin["codex-quota"]).toBe("./codex-quota.js");
 	});
 
-	test("bin includes 'codex-usage' alias", () => {
-		expect(pkg.bin).toHaveProperty("codex-usage");
-		expect(pkg.bin["codex-usage"]).toBe("./codex-quota.js");
+	test("bin includes 'cq' alias", () => {
+		expect(pkg.bin).toHaveProperty("cq");
+		expect(pkg.bin["cq"]).toBe("./codex-quota.js");
 	});
 
 	test("has repository field", () => {
@@ -252,11 +222,6 @@ describe("README documentation", () => {
 
 	test("documents bun add -g codex-quota", () => {
 		expect(readme).toContain("bun add -g codex-quota");
-	});
-
-	test("mentions codex-usage alias", () => {
-		expect(readme).toContain("codex-usage");
-		expect(readme).toContain("alias");
 	});
 
 	test("documents OpenCode integration", () => {
@@ -1610,7 +1575,6 @@ describe("handleSwitch", () => {
 		expect(authContent.tokens).toHaveProperty("refresh_token");
 		expect(authContent.tokens).toHaveProperty("account_id");
 		expect(authContent.tokens).toHaveProperty("expires_at");
-		expect(authContent.tokens).toHaveProperty("last_refresh");
 		
 		// Verify the values match the test account
 		expect(authContent.tokens.access_token).toBe(MOCK_ACCESS_TOKEN);
@@ -1622,8 +1586,9 @@ describe("handleSwitch", () => {
 		expect(authContent.tokens.expires_at).toBeLessThan(Date.now()); // Should be in seconds
 		expect(authContent.tokens.expires_at).toBeGreaterThan(Date.now() / 1000 - 100); // Reasonable range
 		
-		// Verify last_refresh is an ISO timestamp
-		expect(authContent.tokens.last_refresh).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+		// Verify last_refresh is an ISO timestamp at root level (matches Codex CLI format)
+		expect(authContent).toHaveProperty("last_refresh");
+		expect(authContent.last_refresh).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 	});
 
 	test("updates OpenCode auth.json without touching other providers", async () => {

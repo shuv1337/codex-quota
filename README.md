@@ -16,7 +16,7 @@ Or with bun:
 bun add -g codex-quota
 ```
 
-After installation, both `codex-quota` and `codex-usage` commands are available. The `codex-usage` alias is included for backward compatibility.
+After installation, both `codex-quota` and `cq` commands are available.
 
 ## Quick Start
 
@@ -176,19 +176,6 @@ codex-quota add --no-browser
 ```
 
 Copy the URL to a browser on another machine, complete authentication, and the callback will be received by the local server.
-
-## Backward Compatibility
-
-### codex-usage Alias
-
-The original `codex-usage` command is preserved as an alias:
-
-```bash
-codex-usage              # Same as: codex-quota
-codex-usage --json       # Same as: codex-quota --json
-```
-
-Both commands point to the same script.
 
 ## Troubleshooting
 

@@ -41,7 +41,6 @@ const JWT_PROFILE = "https://api.openai.com/profile";
 
 // CLI command names
 const PRIMARY_CMD = "codex-quota";
-const ALIAS_CMD = "codex-usage";
 
 const MULTI_ACCOUNT_PATHS = [
 	join(homedir(), ".codex-accounts.json"),
@@ -246,8 +245,11 @@ function loadAllAccounts() {
 		all.push(...loadAccountsFromFile(path));
 	}
 	
-	// 3. Load from Codex CLI auth.json
-	all.push(...loadAccountFromCodexCli());
+	// 3. Only load codex-cli synthetic account if no other accounts exist
+	// (prevents duplicate entries when user has multi-account file)
+	if (all.length === 0) {
+		all.push(...loadAccountFromCodexCli());
+	}
 	
 	return all;
 }
@@ -508,8 +510,9 @@ function parseWindow(window) {
 }
 
 function formatPercent(used, remaining) {
-	if (used !== undefined) return `${Math.round(used)}% used`;
+	// Prefer showing remaining (matches Codex CLI /status display)
 	if (remaining !== undefined) return `${Math.round(remaining)}% left`;
+	if (used !== undefined) return `${Math.round(100 - used)}% left`;
 	return null;
 }
 
@@ -579,8 +582,9 @@ function formatUsage(payload) {
 	return lines.length ? lines : ["  (no usage data)"];
 }
 
-function printBar(used, width = 20) {
-	const filled = Math.round((used / 100) * width);
+function printBar(remaining, width = 20) {
+	// Bar shows remaining quota: full = 100% left, empty = 0% left (matches Codex CLI)
+	const filled = Math.round((remaining / 100) * width);
 	const empty = width - filled;
 	const bar = "█".repeat(filled) + "░".repeat(empty);
 	return `[${bar}]`;
@@ -606,7 +610,10 @@ function printAccountUsage(account, payload) {
 	}
 	
 	if (session?.used !== undefined) {
-		console.log(`  ${printBar(session.used)} ${Math.round(session.used)}% session used`);
+		const remaining = 100 - session.used;
+		console.log(`  ${printBar(remaining)} ${Math.round(remaining)}% remaining`);
+	} else if (session?.remaining !== undefined) {
+		console.log(`  ${printBar(session.remaining)} ${Math.round(session.remaining)}% remaining`);
 	}
 	
 	for (const line of formatUsage(payload)) {
@@ -652,9 +659,6 @@ OpenCode Integration:
   The 'switch' command updates both Codex CLI (~/.codex/auth.json) and
   OpenCode (~/.local/share/opencode/auth.json) authentication files,
   allowing seamless account switching across both tools.
-
-Aliases:
-  ${ALIAS_CMD}       Included for backward compatibility
 
 Run '${PRIMARY_CMD} <command> --help' for help on a specific command.
 `);
@@ -1520,18 +1524,26 @@ async function handleSwitch(args, flags) {
 			}
 		}
 		
-		// 5. Build new auth.json structure
+		// 5. Build new auth.json structure (matching Codex CLI format)
+		const tokens = {
+			access_token: account.access,
+			refresh_token: account.refresh,
+			account_id: account.accountId,
+			expires_at: Math.floor(account.expires / 1000), // Convert ms to seconds
+		};
+		
+		// Only include id_token if it exists (Codex CLI rejects null)
+		if (account.idToken) {
+			tokens.id_token = account.idToken;
+		}
+		
 		const newAuth = {
 			// Preserve existing OPENAI_API_KEY if present
-			...(existingAuth.OPENAI_API_KEY ? { OPENAI_API_KEY: existingAuth.OPENAI_API_KEY } : {}),
-			tokens: {
-				id_token: account.idToken || null,
-				access_token: account.access,
-				refresh_token: account.refresh,
-				account_id: account.accountId,
-				expires_at: Math.floor(account.expires / 1000), // Convert ms to seconds
-				last_refresh: new Date().toISOString(),
-			},
+			...(existingAuth.OPENAI_API_KEY !== undefined ? { OPENAI_API_KEY: existingAuth.OPENAI_API_KEY } : {}),
+			tokens,
+			last_refresh: new Date().toISOString(),
+			// Track which managed account we switched to (for detecting native login divergence)
+			codex_quota_label: label,
 		};
 		
 		// 6. Create ~/.codex directory if needed
@@ -1613,6 +1625,34 @@ function getActiveAccountId() {
 }
 
 /**
+ * Get detailed info about the currently active account from ~/.codex/auth.json
+ * Includes tracked label if set by codex-quota switch command
+ * @returns {{ accountId: string | null, trackedLabel: string | null, source: "codex-quota" | "native" | null }}
+ */
+function getActiveAccountInfo() {
+	if (!existsSync(CODEX_CLI_AUTH_PATH)) {
+		return { accountId: null, trackedLabel: null, source: null };
+	}
+	
+	try {
+		const raw = readFileSync(CODEX_CLI_AUTH_PATH, "utf-8");
+		const parsed = JSON.parse(raw);
+		const tokens = parsed?.tokens;
+		const trackedLabel = parsed?.codex_quota_label ?? null;
+		
+		if (tokens?.access_token) {
+			const accountId = extractAccountId(tokens.access_token);
+			// Determine source: if we have our label marker, it was set by codex-quota
+			const source = trackedLabel ? "codex-quota" : "native";
+			return { accountId, trackedLabel, source };
+		}
+	} catch {
+		// Invalid JSON or read error
+	}
+	return { accountId: null, trackedLabel: null, source: null };
+}
+
+/**
  * Format expiry time as human-readable duration
  * @param {number | undefined} expires - Expiry timestamp in milliseconds
  * @returns {{ status: string, display: string }} Status and display string
@@ -1689,14 +1729,31 @@ async function handleList(flags) {
 		return;
 	}
 	
-	// Get active account ID from ~/.codex/auth.json
-	const activeAccountId = getActiveAccountId();
+	// Get active account info from ~/.codex/auth.json
+	const activeInfo = getActiveAccountInfo();
+	const { accountId: activeAccountId, trackedLabel, source: authSource } = activeInfo;
+	
+	// Detect divergence: native login occurred if accountId exists but trackedLabel doesn't match
+	// any managed account, or if authSource is "native"
+	let divergenceDetected = false;
+	let nativeAccountId = null;
+	
+	if (activeAccountId && authSource === "native") {
+		// Native login detected (no codex_quota_label in auth.json)
+		divergenceDetected = true;
+		nativeAccountId = activeAccountId;
+	}
 	
 	// Build account details for each account
 	const accountDetails = accounts.map(account => {
 		const profile = extractProfile(account.access);
 		const expiry = formatExpiryStatus(account.expires);
-		const isActive = account.accountId === activeAccountId;
+		
+		// isActive: matches our tracked label (set by codex-quota switch)
+		const isActive = trackedLabel !== null && account.label === trackedLabel;
+		
+		// isNativeActive: accountId matches but not tracked by us (native login)
+		const isNativeActive = !isActive && account.accountId === nativeAccountId;
 		
 		return {
 			label: account.label,
@@ -1708,12 +1765,22 @@ async function handleList(flags) {
 			expiryDisplay: expiry.display,
 			source: account.source,
 			isActive,
+			isNativeActive,
 		};
 	});
 	
 	// JSON output
 	if (flags.json) {
-		console.log(JSON.stringify({ accounts: accountDetails }, null, 2));
+		const output = {
+			accounts: accountDetails,
+			activeInfo: {
+				trackedLabel,
+				accountId: activeAccountId,
+				source: authSource,
+				divergence: divergenceDetected,
+			},
+		};
+		console.log(JSON.stringify(output, null, 2));
 		return;
 	}
 	
@@ -1721,8 +1788,16 @@ async function handleList(flags) {
 	console.log(`Accounts (${accounts.length} total):\n`);
 	
 	for (const detail of accountDetails) {
-		// Active indicator: * for active, space for inactive
-		const activeMarker = detail.isActive ? "*" : " ";
+		// Active indicator:
+		// * = active account set by codex-quota
+		// ~ = native login (not set by us, but currently active in auth.json)
+		//   = inactive
+		let activeMarker = " ";
+		if (detail.isActive) {
+			activeMarker = "*";
+		} else if (detail.isNativeActive) {
+			activeMarker = "~";
+		}
 		
 		// Label and email
 		const emailDisplay = detail.email ? ` <${detail.email}>` : "";
@@ -1735,9 +1810,19 @@ async function handleList(flags) {
 		console.log(`    ${planDisplay} | ${expiryDisplay} | ${sourceDisplay}`);
 	}
 	
-	// Legend
-	if (activeAccountId) {
-		console.log("\n* = active account (in ~/.codex/auth.json)");
+	// Legend - show appropriate legend based on what markers are present
+	const hasActive = accountDetails.some(a => a.isActive);
+	const hasNativeActive = accountDetails.some(a => a.isNativeActive);
+	
+	if (hasActive || hasNativeActive) {
+		console.log("");
+		if (hasActive) {
+			console.log("* = active (set by codex-quota switch)");
+		}
+		if (hasNativeActive) {
+			console.log(colorize("~ = native login detected (not set by codex-quota)", YELLOW));
+			console.log(`  Run '${PRIMARY_CMD} switch <label>' to take over account management`);
+		}
 	}
 }
 
@@ -2175,6 +2260,7 @@ export {
 	
 	// List helpers (for testing)
 	getActiveAccountId,
+	getActiveAccountInfo,
 	formatExpiryStatus,
 	shortenPath,
 	
@@ -2191,7 +2277,7 @@ export {
 	MULTI_ACCOUNT_PATHS,
 	CODEX_CLI_AUTH_PATH,
 	PRIMARY_CMD,
-	ALIAS_CMD,
+
 	
 	// Help functions (for testing)
 	printHelp,

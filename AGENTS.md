@@ -4,7 +4,7 @@ Guidelines for AI coding agents working in this repository.
 
 ## Project Overview
 
-`codex-usage` is a zero-dependency Node.js CLI for managing multiple OpenAI Codex OAuth accounts. Provides account management (add, switch, remove, list) and quota checking using only Node.js built-in modules.
+`codex-quota` is a zero-dependency Node.js CLI for managing multiple OpenAI Codex OAuth accounts. Provides account management (add, switch, remove, list) and quota checking using only Node.js built-in modules.
 
 ## Tech Stack
 
@@ -41,7 +41,7 @@ bun link
 ## Project Structure
 
 ```
-codex-usage/
+codex-quota/
 ├── codex-quota.js       # Main CLI script (all code in single file)
 ├── codex-quota.test.js  # Test suite using Bun test runner
 ├── package.json         # Project config, scripts, bin entries
