@@ -516,10 +516,33 @@ function formatPercent(used, remaining) {
 	return null;
 }
 
-function formatResetTime(seconds) {
+function formatResetTime(seconds, style = "parentheses") {
 	if (!seconds) return "";
+	
+	const resetDate = new Date(Date.now() + seconds * 1000);
 	const hours = Math.floor(seconds / 3600);
 	const mins = Math.floor((seconds % 3600) / 60);
+	
+	// Format time as HH:MM
+	const timeStr = resetDate.toLocaleTimeString("en-US", { 
+		hour: "2-digit", 
+		minute: "2-digit",
+		hour12: false 
+	});
+	
+	// For display matching Codex CLI style
+	if (style === "inline") {
+		if (hours >= 24) {
+			// Show date for weekly+ resets: "resets 20:26 on 19 Jan"
+			const day = resetDate.getDate();
+			const month = resetDate.toLocaleDateString("en-US", { month: "short" });
+			return `(resets ${timeStr} on ${day} ${month})`;
+		}
+		// Same day: "resets 23:14"
+		return `(resets ${timeStr})`;
+	}
+	
+	// Legacy parentheses style for JSON/other uses
 	if (hours > 24) {
 		const days = Math.floor(hours / 24);
 		return `(resets in ${days}d ${hours % 24}h)`;
@@ -594,7 +617,9 @@ function printAccountUsage(account, payload) {
 	const usage = payload?.usage ?? payload;
 	const rateLimit = usage?.rate_limit;
 	const primaryWindow = rateLimit?.primary_window ?? usage?.primary ?? usage?.session ?? usage?.fiveHour;
+	const secondaryWindow = rateLimit?.secondary_window ?? usage?.secondary ?? usage?.weekly ?? usage?.week;
 	const session = parseWindow(primaryWindow);
+	const weekly = parseWindow(secondaryWindow);
 	
 	// Extract profile info from token
 	const profile = extractProfile(account.access);
@@ -609,15 +634,28 @@ function printAccountUsage(account, payload) {
 		return;
 	}
 	
-	if (session?.used !== undefined) {
-		const remaining = 100 - session.used;
-		console.log(`  ${printBar(remaining)} ${Math.round(remaining)}% remaining`);
-	} else if (session?.remaining !== undefined) {
-		console.log(`  ${printBar(session.remaining)} ${Math.round(session.remaining)}% remaining`);
+	// 5h limit bar (session/primary window)
+	if (session) {
+		const remaining = session.remaining ?? (session.used !== undefined ? 100 - session.used : null);
+		if (remaining !== null) {
+			const reset = session.resetAfterSeconds ? formatResetTime(session.resetAfterSeconds, "inline") : "";
+			console.log(`  5h limit:     ${printBar(remaining)} ${Math.round(remaining)}% left ${reset}`);
+		}
 	}
 	
-	for (const line of formatUsage(payload)) {
-		console.log(line);
+	// Weekly limit bar (secondary window)
+	if (weekly) {
+		const remaining = weekly.remaining ?? (weekly.used !== undefined ? 100 - weekly.used : null);
+		if (remaining !== null) {
+			const reset = weekly.resetAfterSeconds ? formatResetTime(weekly.resetAfterSeconds, "inline") : "";
+			console.log(`  Weekly limit: ${printBar(remaining)} ${Math.round(remaining)}% left ${reset}`);
+		}
+	}
+	
+	// Show plan type if available
+	const planType = usage?.plan_type;
+	if (planType) {
+		console.log(`  Plan: ${planType}`);
 	}
 }
 
