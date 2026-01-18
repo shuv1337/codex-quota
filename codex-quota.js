@@ -1507,8 +1507,15 @@ async function handleAdd(args, flags) {
 			}, null, 2));
 		} else {
 			const emailDisplay = tokens.email ? ` <${tokens.email}>` : "";
-			console.log(colorize(`\nAdded account "${label}"${emailDisplay}`, GREEN));
-			console.log(`  Saved to: ${targetPath}`);
+			const lines = [
+				colorize(`Added account ${label}${emailDisplay}`, GREEN),
+				"",
+				`Saved to: ${shortenPath(targetPath)}`,
+				"",
+				`Run 'cq switch ${label}' to activate this account`,
+			];
+			const boxLines = drawBox(lines);
+			console.log(boxLines.join("\n"));
 		}
 	} catch (error) {
 		// Handle specific error types with user-friendly messages (JSON OR human-readable, not both)
@@ -1664,11 +1671,17 @@ async function handleSwitch(args, flags) {
 			console.log(JSON.stringify(output, null, 2));
 		} else {
 			const emailDisplay = profile.email ? ` <${profile.email}>` : "";
-			console.log(colorize(`Switched to "${label}"${emailDisplay}`, GREEN));
-			console.log(`  Updated: ${CODEX_CLI_AUTH_PATH}`);
+			const planDisplay = profile.planType ? ` (${profile.planType})` : "";
+			const lines = [
+				colorize(`Switched to ${label}${emailDisplay}${planDisplay}`, GREEN),
+				"",
+				`Codex CLI: ${shortenPath(CODEX_CLI_AUTH_PATH)}`,
+			];
 			if (opencodeUpdate.updated) {
-				console.log(`  OpenCode: ${shortenPath(opencodeUpdate.path)}`);
+				lines.push(`OpenCode:  ${shortenPath(opencodeUpdate.path)}`);
 			}
+			const boxLines = drawBox(lines);
+			console.log(boxLines.join("\n"));
 		}
 	} catch (error) {
 		if (flags.json) {
@@ -1864,30 +1877,43 @@ async function handleList(flags) {
 		return;
 	}
 	
-	// Human-readable output
-	console.log(`Accounts (${accounts.length} total):\n`);
+	// Human-readable output with box styling
+	const lines = [];
+	lines.push(`Accounts (${accounts.length} total)`);
+	lines.push("");
 	
-	for (const detail of accountDetails) {
+	for (let i = 0; i < accountDetails.length; i++) {
+		const detail = accountDetails[i];
+		
 		// Active indicator:
 		// * = active account set by codex-quota
 		// ~ = native login (not set by us, but currently active in auth.json)
 		//   = inactive
 		let activeMarker = " ";
+		let statusText = "";
 		if (detail.isActive) {
 			activeMarker = "*";
+			statusText = " [active]";
 		} else if (detail.isNativeActive) {
 			activeMarker = "~";
+			statusText = " [native]";
 		}
 		
-		// Label and email
+		// Label and email with plan
 		const emailDisplay = detail.email ? ` <${detail.email}>` : "";
-		console.log(`${activeMarker} ${detail.label}${emailDisplay}`);
+		const planDisplay = detail.planType ? ` (${detail.planType})` : "";
+		lines.push(`${activeMarker} ${detail.label}${emailDisplay}${planDisplay}${statusText}`);
 		
-		// Details line with plan, expiry, and source
-		const planDisplay = detail.planType ? `Plan: ${detail.planType}` : "Plan: Unknown";
-		const expiryDisplay = `Expires: ${detail.expiryDisplay}`;
-		const sourceDisplay = `Source: ${shortenPath(detail.source)}`;
-		console.log(`    ${planDisplay} | ${expiryDisplay} | ${sourceDisplay}`);
+		// Details line with expiry and source
+		const expiryColor = detail.expiryStatus === "expired" ? "Expired" : 
+		                    detail.expiryStatus === "expiring" ? detail.expiryDisplay :
+		                    `Expires: ${detail.expiryDisplay}`;
+		lines.push(`  ${expiryColor} | ${shortenPath(detail.source)}`);
+		
+		// Add spacing between accounts (but not after the last one)
+		if (i < accountDetails.length - 1) {
+			lines.push("");
+		}
 	}
 	
 	// Legend - show appropriate legend based on what markers are present
@@ -1895,15 +1921,17 @@ async function handleList(flags) {
 	const hasNativeActive = accountDetails.some(a => a.isNativeActive);
 	
 	if (hasActive || hasNativeActive) {
-		console.log("");
+		lines.push("");
 		if (hasActive) {
-			console.log("* = active (set by codex-quota switch)");
+			lines.push("* = active (set by cq switch)");
 		}
 		if (hasNativeActive) {
-			console.log(colorize("~ = native login detected (not set by codex-quota)", YELLOW));
-			console.log(`  Run '${PRIMARY_CMD} switch <label>' to take over account management`);
+			lines.push("~ = native login (run 'cq switch' to manage)");
 		}
 	}
+	
+	const boxLines = drawBox(lines);
+	console.log(boxLines.join("\n"));
 }
 
 /**
@@ -2002,8 +2030,12 @@ async function handleRemove(args, flags) {
 					message: "Codex CLI auth cleared" 
 				}, null, 2));
 			} else {
-				console.log(colorize(`Removed account "${label}"`, GREEN));
-				console.log(`Deleted: ${shortenPath(source)}`);
+				const lines = [
+					colorize(`Removed account ${label}`, GREEN),
+					"",
+					`Deleted: ${shortenPath(source)}`,
+				];
+				console.log(drawBox(lines).join("\n"));
 			}
 		} catch (err) {
 			if (flags.json) {
@@ -2074,8 +2106,12 @@ async function handleRemove(args, flags) {
 					message: "File deleted (no accounts remaining)" 
 				}, null, 2));
 			} else {
-				console.log(colorize(`Removed account "${label}"`, GREEN));
-				console.log(`Deleted: ${shortenPath(source)} (no accounts remaining)`);
+				const lines = [
+					colorize(`Removed account ${label}`, GREEN),
+					"",
+					`Deleted: ${shortenPath(source)} (no accounts remaining)`,
+				];
+				console.log(drawBox(lines).join("\n"));
 			}
 		} else {
 			// Write updated accounts atomically
@@ -2093,8 +2129,12 @@ async function handleRemove(args, flags) {
 					remainingAccounts: updatedAccounts.length 
 				}, null, 2));
 			} else {
-				console.log(colorize(`Removed account "${label}"`, GREEN));
-				console.log(`Updated: ${shortenPath(source)} (${updatedAccounts.length} account(s) remaining)`);
+				const lines = [
+					colorize(`Removed account ${label}`, GREEN),
+					"",
+					`Updated: ${shortenPath(source)} (${updatedAccounts.length} account(s) remaining)`,
+				];
+				console.log(drawBox(lines).join("\n"));
 			}
 		}
 	} catch (err) {
