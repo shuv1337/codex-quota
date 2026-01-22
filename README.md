@@ -47,6 +47,7 @@ Check usage quota for accounts.
 codex-quota                    # All accounts
 codex-quota personal           # Specific account
 codex-quota --json             # JSON output
+codex-quota --claude           # Include Claude Code usage
 ```
 
 ### add
@@ -105,6 +106,7 @@ Note: Accounts from `CODEX_ACCOUNTS` env var cannot be removed via CLI.
 | `--json` | Output in JSON format |
 | `--no-browser` | Print auth URL instead of opening browser |
 | `--no-color` | Disable colored output |
+| `--claude` | Include Claude Code usage (uses `~/.claude/.credentials.json`) |
 | `--version, -v` | Show version number |
 | `--help, -h` | Show help |
 
@@ -251,6 +253,32 @@ codex-quota switch personal --json
 codex-quota switch nonexistent --json
 # {"success":false,"error":"Account not found","availableLabels":["personal","work"]}
 ```
+
+## Claude Code Usage (Optional)
+
+Use the `--claude` flag to include Claude Code subscription usage alongside OpenAI quotas:
+
+```bash
+codex-quota --claude
+```
+
+This uses your local Claude session to call:
+- `https://claude.ai/api/organizations`
+- `https://claude.ai/api/organizations/{orgId}/usage`
+- `https://claude.ai/api/organizations/{orgId}/overage_spend_limit`
+- `https://claude.ai/api/account`
+
+Authentication sources (in order):
+1. Browser cookies (Chromium/Chrome) to read `sessionKey` and `lastActiveOrg`
+2. `~/.claude/.credentials.json` OAuth `accessToken`
+
+Environment overrides:
+- `CLAUDE_CREDENTIALS_PATH` to point to a different credentials file
+- `CLAUDE_COOKIE_DB_PATH` to point to a specific Chromium/Chrome Cookies DB
+
+Notes:
+- On Linux, cookie access requires `sqlite3` and `secret-tool` (libsecret) to decrypt cookies.
+- For best results, keep `claude.ai` logged in within your Chromium/Chrome profile.
 
 ## Releasing
 

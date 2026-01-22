@@ -5,7 +5,15 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { writeFileSync, mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
+import {
+	writeFileSync,
+	mkdirSync,
+	rmSync,
+	existsSync,
+	readFileSync,
+	lstatSync,
+	symlinkSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 
@@ -1389,13 +1397,27 @@ describe("shortenPath", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("getActiveAccountId", () => {
+	const testDir = join(tmpdir(), "codex-auth-test-" + Date.now());
+	const testAuthPath = join(testDir, "auth.json");
+	let originalCodexAuthPath;
+
+	beforeEach(() => {
+		originalCodexAuthPath = process.env.CODEX_AUTH_PATH;
+		process.env.CODEX_AUTH_PATH = testAuthPath;
+	});
+
+	afterEach(() => {
+		if (originalCodexAuthPath === undefined) {
+			delete process.env.CODEX_AUTH_PATH;
+		} else {
+			process.env.CODEX_AUTH_PATH = originalCodexAuthPath;
+		}
+		rmSync(testDir, { recursive: true, force: true });
+	});
+
 	test("returns null when auth file does not exist", () => {
-		// Note: This test relies on the actual filesystem state
-		// In most test environments, ~/.codex/auth.json may or may not exist
-		// We're testing the function returns a valid account ID or null
 		const result = getActiveAccountId();
-		// Result should be either a string (account ID) or null
-		expect(result === null || typeof result === "string").toBe(true);
+		expect(result).toBe(null);
 	});
 
 	// Note: More comprehensive tests would require mocking the filesystem
@@ -1413,6 +1435,7 @@ describe("handleSwitch", () => {
 	const testAuthDir = join(testDir, ".codex");
 	const testAuthFile = join(testAuthDir, "auth.json");
 	let originalEnv;
+	let originalCodexAuthPath;
 	let originalXdgDataHome;
 	let originalExit;
 	let originalConsoleLog;
@@ -1427,7 +1450,9 @@ describe("handleSwitch", () => {
 		
 		// Save original env and set up test env account
 		originalEnv = process.env.CODEX_ACCOUNTS;
+		originalCodexAuthPath = process.env.CODEX_AUTH_PATH;
 		originalXdgDataHome = process.env.XDG_DATA_HOME;
+		process.env.CODEX_AUTH_PATH = testAuthFile;
 		process.env.XDG_DATA_HOME = testDir;
 		
 		// Create a test account with valid tokens in env var
@@ -1472,6 +1497,11 @@ describe("handleSwitch", () => {
 			delete process.env.CODEX_ACCOUNTS;
 		} else {
 			process.env.CODEX_ACCOUNTS = originalEnv;
+		}
+		if (originalCodexAuthPath === undefined) {
+			delete process.env.CODEX_AUTH_PATH;
+		} else {
+			process.env.CODEX_AUTH_PATH = originalCodexAuthPath;
 		}
 		if (originalXdgDataHome === undefined) {
 			delete process.env.XDG_DATA_HOME;
@@ -1537,15 +1567,6 @@ describe("handleSwitch", () => {
 	});
 
 	test("outputs success JSON with all required fields when switch succeeds", async () => {
-		// Note: This test relies on the actual ~/.codex/auth.json being writable
-		// In a real test environment, this might write to the user's home directory
-		// For safety, we're only testing the JSON output structure and that the
-		// function doesn't throw errors for valid inputs
-		
-		// Since handleSwitch writes to the real ~/.codex/auth.json, we need to verify
-		// that it at least attempts the switch without errors for a valid account
-		// We can verify the JSON output structure indicates success
-		
 		await handleSwitch(["test-switch-account"], { json: true });
 		
 		// Find the JSON output (success response starts with { and contains "success")
@@ -1563,11 +1584,10 @@ describe("handleSwitch", () => {
 		// Execute the switch
 		await handleSwitch(["test-switch-account"], { json: true });
 		
-		// Read the actual auth.json that was written
-		const authPath = join(homedir(), ".codex", "auth.json");
-		expect(existsSync(authPath)).toBe(true);
+		// Read the test auth.json that was written
+		expect(existsSync(testAuthFile)).toBe(true);
 		
-		const authContent = JSON.parse(readFileSync(authPath, "utf-8"));
+		const authContent = JSON.parse(readFileSync(testAuthFile, "utf-8"));
 		
 		// Verify the tokens object structure
 		expect(authContent).toHaveProperty("tokens");
@@ -1627,6 +1647,46 @@ describe("handleSwitch", () => {
 		expect(updatedAuth.openai.accountId).toBe(MOCK_ACCOUNT_ID);
 		expect(updatedAuth.openai.expires).toBe(expectedExpires);
 		expect(updatedAuth.openai.extra).toBe("keep");
+	});
+
+	test("preserves symlinked OpenCode auth.json", async () => {
+		if (process.platform === "win32") {
+			return;
+		}
+		const opencodeDir = join(testDir, "opencode");
+		const realDir = join(testDir, "real-auth");
+		const opencodeAuthPath = join(opencodeDir, "auth.json");
+		const realAuthPath = join(realDir, "auth.json");
+		
+		mkdirSync(opencodeDir, { recursive: true });
+		mkdirSync(realDir, { recursive: true });
+		
+		const existingAuth = {
+			openai: {
+				type: "oauth",
+				access: "old_access",
+				refresh: "old_refresh",
+				expires: 123,
+				accountId: "old_account",
+			},
+			anthropic: {
+				type: "api",
+				key: "anthropic_key",
+			},
+		};
+		writeFileSync(realAuthPath, JSON.stringify(existingAuth, null, 2) + "\n", "utf-8");
+		symlinkSync(realAuthPath, opencodeAuthPath);
+		
+		await handleSwitch(["test-switch-account"], { json: true });
+		
+		expect(lstatSync(opencodeAuthPath).isSymbolicLink()).toBe(true);
+		
+		const updatedAuth = JSON.parse(readFileSync(realAuthPath, "utf-8"));
+		expect(updatedAuth.anthropic).toEqual(existingAuth.anthropic);
+		expect(updatedAuth.openai.type).toBe("oauth");
+		expect(updatedAuth.openai.access).toBe(MOCK_ACCESS_TOKEN);
+		expect(updatedAuth.openai.refresh).toBe(MOCK_REFRESH_TOKEN);
+		expect(updatedAuth.openai.accountId).toBe(MOCK_ACCOUNT_ID);
 	});
 });
 

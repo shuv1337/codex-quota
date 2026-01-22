@@ -19,13 +19,25 @@
  * Codex CLI format: { "tokens": { access_token, refresh_token, expires_at } }
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, renameSync, unlinkSync, realpathSync } from "node:fs";
+import {
+	existsSync,
+	readFileSync,
+	writeFileSync,
+	copyFileSync,
+	mkdirSync,
+	chmodSync,
+	renameSync,
+	unlinkSync,
+	realpathSync,
+	lstatSync,
+	readlinkSync,
+} from "node:fs";
 import { createServer } from "node:net";
 import { createServer as createHttpServer } from "node:http";
-import { spawn } from "node:child_process";
-import { randomBytes, createHash } from "node:crypto";
-import { homedir } from "node:os";
-import { join, dirname } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+import { randomBytes, createHash, pbkdf2Sync, createDecipheriv } from "node:crypto";
+import { homedir, tmpdir } from "node:os";
+import { join, dirname, resolve, isAbsolute } from "node:path";
 import { createInterface } from "node:readline";
 
 // OAuth config (matches OpenAI Codex CLI)
@@ -38,6 +50,13 @@ const OAUTH_TIMEOUT_MS = 120000; // 2 minutes
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const JWT_CLAIM = "https://api.openai.com/auth";
 const JWT_PROFILE = "https://api.openai.com/profile";
+const CLAUDE_CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
+const CLAUDE_API_BASE = "https://claude.ai/api";
+const CLAUDE_ORIGIN = "https://claude.ai";
+const CLAUDE_ORGS_URL = `${CLAUDE_API_BASE}/organizations`;
+const CLAUDE_ACCOUNT_URL = `${CLAUDE_API_BASE}/account`;
+const CLAUDE_TIMEOUT_MS = 15000;
+const CLAUDE_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 // CLI command names
 const PRIMARY_CMD = "codex-quota";
@@ -153,6 +172,66 @@ function getOpencodeAuthPath() {
 }
 
 /**
+ * Resolve Codex CLI auth.json path with optional override.
+ * @returns {string}
+ */
+function getCodexCliAuthPath() {
+	const override = process.env.CODEX_AUTH_PATH;
+	return override ? override : CODEX_CLI_AUTH_PATH;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// File helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve the correct write target for a path, preserving symlink files.
+ * @param {string} filePath - Intended path to write
+ * @returns {{ path: string, isSymlink: boolean }}
+ */
+function resolveWritePath(filePath) {
+	try {
+		const stats = lstatSync(filePath);
+		if (!stats.isSymbolicLink()) {
+			return { path: filePath, isSymlink: false };
+		}
+		try {
+			return { path: realpathSync(filePath), isSymlink: true };
+		} catch {
+			let linkTarget = readlinkSync(filePath);
+			if (!isAbsolute(linkTarget)) {
+				linkTarget = resolve(dirname(filePath), linkTarget);
+			}
+			return { path: linkTarget, isSymlink: true };
+		}
+	} catch {
+		return { path: filePath, isSymlink: false };
+	}
+}
+
+/**
+ * Write a file atomically while preserving existing symlink files.
+ * @param {string} filePath - Intended path to write
+ * @param {string} contents - File contents
+ * @param {{ mode?: number }} [options]
+ * @returns {string} Actual path written
+ */
+function writeFileAtomic(filePath, contents, options = {}) {
+	const { path: targetPath } = resolveWritePath(filePath);
+	const dir = dirname(targetPath);
+	if (!existsSync(dir)) {
+		mkdirSync(dir, { recursive: true });
+	}
+	const tempPath = `${targetPath}.tmp`;
+	writeFileSync(tempPath, contents, "utf-8");
+	if (options.mode !== undefined) {
+		chmodSync(tempPath, options.mode);
+	}
+	renameSync(tempPath, targetPath);
+	return targetPath;
+}
+
+/**
  * Load accounts from CODEX_ACCOUNTS environment variable
  * @returns {Array<{label: string, accountId: string, access: string, refresh: string, expires?: number, source: string}>}
  */
@@ -199,10 +278,11 @@ function loadAccountsFromFile(filePath) {
  * @returns {Array<{label: string, accountId: string, access: string, refresh: string, expires?: number, source: string}>}
  */
 function loadAccountFromCodexCli() {
-	if (!existsSync(CODEX_CLI_AUTH_PATH)) return [];
+	const codexAuthPath = getCodexCliAuthPath();
+	if (!existsSync(codexAuthPath)) return [];
 	
 	try {
-		const raw = readFileSync(CODEX_CLI_AUTH_PATH, "utf-8");
+		const raw = readFileSync(codexAuthPath, "utf-8");
 		const parsed = JSON.parse(raw);
 		const tokens = parsed?.tokens;
 		
@@ -221,7 +301,7 @@ function loadAccountFromCodexCli() {
 			access: tokens.access_token,
 			refresh: tokens.refresh_token,
 			expires: tokens.expires_at ? tokens.expires_at * 1000 : Date.now() - 1000,
-			source: CODEX_CLI_AUTH_PATH,
+			source: codexAuthPath,
 		}];
 	} catch {
 		// Invalid JSON or read error - silently return empty array
@@ -307,22 +387,23 @@ function loadAccounts() {
 	}
 	
 	// 3. Check Codex CLI auth.json (single account format)
-	if (existsSync(CODEX_CLI_AUTH_PATH)) {
+	const codexAuthPath = getCodexCliAuthPath();
+	if (existsSync(codexAuthPath)) {
 		try {
-			const raw = readFileSync(CODEX_CLI_AUTH_PATH, "utf-8");
+			const raw = readFileSync(codexAuthPath, "utf-8");
 			const parsed = JSON.parse(raw);
 			const tokens = parsed?.tokens;
 			if (tokens?.access_token && tokens?.refresh_token) {
 				const accountId = extractAccountId(tokens.access_token);
 				if (accountId) {
-					activeAccountsPath = CODEX_CLI_AUTH_PATH;
+					activeAccountsPath = codexAuthPath;
 					return [{
 						label: "codex-cli",
 						accountId,
 						access: tokens.access_token,
 						refresh: tokens.refresh_token,
 						expires: tokens.expires_at ? tokens.expires_at * 1000 : Date.now() - 1000,
-						source: CODEX_CLI_AUTH_PATH,
+						source: codexAuthPath,
 					}];
 				}
 			}
@@ -340,18 +421,19 @@ function isValidAccount(a) {
 
 function saveAccounts(accounts) {
 	if (!activeAccountsPath) return;
+	const codexAuthPath = getCodexCliAuthPath();
 	
 	// Don't modify Codex CLI auth.json format
-	if (activeAccountsPath === CODEX_CLI_AUTH_PATH) {
+	if (activeAccountsPath === codexAuthPath) {
 		try {
-			const raw = readFileSync(CODEX_CLI_AUTH_PATH, "utf-8");
+			const raw = readFileSync(codexAuthPath, "utf-8");
 			const parsed = JSON.parse(raw);
 			const account = accounts[0];
 			if (account && parsed.tokens) {
 				parsed.tokens.access_token = account.access;
 				parsed.tokens.refresh_token = account.refresh;
 				parsed.tokens.expires_at = Math.floor(account.expires / 1000);
-				writeFileSync(CODEX_CLI_AUTH_PATH, JSON.stringify(parsed, null, 2) + "\n", "utf-8");
+				writeFileAtomic(codexAuthPath, JSON.stringify(parsed, null, 2) + "\n");
 			}
 		} catch {
 			// ignore
@@ -361,7 +443,7 @@ function saveAccounts(accounts) {
 	
 	const dir = dirname(activeAccountsPath);
 	if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-	writeFileSync(activeAccountsPath, JSON.stringify({ accounts }, null, 2) + "\n", "utf-8");
+	writeFileAtomic(activeAccountsPath, JSON.stringify({ accounts }, null, 2) + "\n");
 }
 
 /**
@@ -405,14 +487,7 @@ function updateOpencodeAuth(account) {
 	};
 	
 	try {
-		const dir = dirname(authPath);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
-		const tempPath = `${authPath}.tmp`;
-		writeFileSync(tempPath, JSON.stringify(updatedAuth, null, 2) + "\n", "utf-8");
-		chmodSync(tempPath, 0o600);
-		renameSync(tempPath, authPath);
+		writeFileAtomic(authPath, JSON.stringify(updatedAuth, null, 2) + "\n", { mode: 0o600 });
 	} catch (err) {
 		const message = err?.message ?? String(err);
 		return { updated: false, path: authPath, error: `Failed to write OpenCode auth.json: ${message}` };
@@ -497,6 +572,547 @@ async function fetchUsage(account) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Claude usage fetch
+// ─────────────────────────────────────────────────────────────────────────────
+
+function isClaudeSessionKey(value) {
+	return typeof value === "string" && value.startsWith("sk-ant-oat");
+}
+
+function findClaudeSessionKey(value) {
+	if (isClaudeSessionKey(value)) return value;
+	if (!value || typeof value !== "object") return null;
+
+	const direct = value.sessionKey
+		?? value.session_key
+		?? value.token
+		?? value.sessionToken
+		?? value.accessToken
+		?? value.access_token
+		?? value.oauthAccessToken;
+	if (isClaudeSessionKey(direct)) return direct;
+
+	for (const child of Object.values(value)) {
+		const found = findClaudeSessionKey(child);
+		if (found) return found;
+	}
+	return null;
+}
+
+function loadClaudeSessionFromCredentials() {
+	const credentialsPath = process.env.CLAUDE_CREDENTIALS_PATH || CLAUDE_CREDENTIALS_PATH;
+	if (!existsSync(credentialsPath)) {
+		return {
+			sessionKey: null,
+			source: credentialsPath,
+			error: `Claude credentials not found at ${credentialsPath}`,
+		};
+	}
+
+	try {
+		const raw = readFileSync(credentialsPath, "utf-8");
+		const parsed = JSON.parse(raw);
+		const sessionKey = findClaudeSessionKey(parsed);
+		if (!sessionKey) {
+			return {
+				sessionKey: null,
+				source: credentialsPath,
+				error: "No Claude sessionKey found in credentials file",
+			};
+		}
+		return { sessionKey, source: credentialsPath };
+	} catch (err) {
+		return {
+			sessionKey: null,
+			source: credentialsPath,
+			error: `Failed to read Claude credentials: ${err?.message ?? String(err)}`,
+		};
+	}
+}
+
+function loadClaudeOAuthToken() {
+	const credentialsPath = process.env.CLAUDE_CREDENTIALS_PATH || CLAUDE_CREDENTIALS_PATH;
+	if (!existsSync(credentialsPath)) {
+		return { token: null, source: credentialsPath, error: `Claude credentials not found at ${credentialsPath}` };
+	}
+
+	try {
+		const raw = readFileSync(credentialsPath, "utf-8");
+		const parsed = JSON.parse(raw);
+		const token =
+			parsed?.claudeAiOauth?.accessToken
+			?? parsed?.claude_ai_oauth?.accessToken
+			?? parsed?.accessToken
+			?? parsed?.access_token
+			?? null;
+		if (!token) {
+			return { token: null, source: credentialsPath, error: "No Claude OAuth accessToken found" };
+		}
+		return { token, source: credentialsPath };
+	} catch (err) {
+		return {
+			token: null,
+			source: credentialsPath,
+			error: `Failed to read Claude credentials: ${err?.message ?? String(err)}`,
+		};
+	}
+}
+
+function getChromeSafeStoragePassword() {
+	const candidates = ["chromium", "chrome", "google-chrome", "google-chrome-canary"];
+	for (const app of candidates) {
+		try {
+			const result = spawnSync("secret-tool", ["lookup", "application", app], {
+				encoding: "utf-8",
+			});
+			if (result.status === 0) {
+				const value = (result.stdout || "").trim();
+				if (value) return value;
+			}
+		} catch {
+			// ignore
+		}
+	}
+	return "peanuts";
+}
+
+function decryptChromeCookie(encryptedValue, password) {
+	if (!encryptedValue || encryptedValue.length < 4) return null;
+	const prefix = encryptedValue.slice(0, 3).toString("utf-8");
+	if (prefix !== "v10" && prefix !== "v11") {
+		try {
+			return encryptedValue.toString("utf-8");
+		} catch {
+			return null;
+		}
+	}
+
+	try {
+		const ciphertext = encryptedValue.slice(3);
+		const key = pbkdf2Sync(password, "saltysalt", 1, 16, "sha1");
+		const iv = Buffer.alloc(16, " ");
+		const decipher = createDecipheriv("aes-128-cbc", key, iv);
+		let decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+		const pad = decrypted[decrypted.length - 1];
+		if (pad > 0 && pad <= 16) {
+			decrypted = decrypted.slice(0, -pad);
+		}
+		return decrypted.toString("utf-8");
+	} catch {
+		return null;
+	}
+}
+
+function stripNonPrintable(value) {
+	if (!value) return value;
+	return value.replace(/^[^\x20-\x7E]+/, "").replace(/[^\x20-\x7E]+$/, "");
+}
+
+function extractClaudeCookieValue(value, name = null) {
+	const cleaned = stripNonPrintable(value);
+	if (!cleaned) return null;
+	const asciiOnly = cleaned.replace(/[^\x20-\x7E]/g, "");
+	if (!asciiOnly) return null;
+	if (name === "sessionKey") {
+		const match = asciiOnly.match(/sk-ant-[a-z0-9_-]+/i);
+		return match ? match[0] : null;
+	}
+	if (name === "cf_clearance") {
+		const match = asciiOnly.match(/[A-Za-z0-9._-]{20,}/);
+		return match ? match[0] : null;
+	}
+	if (name === "lastActiveOrg") {
+		const match = asciiOnly.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+		return match ? match[0] : null;
+	}
+	return asciiOnly;
+}
+
+function readClaudeCookiesFromDb(cookiePath) {
+	const tempPath = join(tmpdir(), `cq-claude-cookies-${randomBytes(6).toString("hex")}.db`);
+	try {
+		copyFileSync(cookiePath, tempPath);
+		const query = [
+			"select name, value, hex(encrypted_value)",
+			"from cookies",
+			"where host_key like '%claude.ai%'",
+			";",
+		].join(" ");
+		const result = spawnSync("sqlite3", ["-readonly", "-separator", "\t", tempPath, query], {
+			encoding: "utf-8",
+		});
+		if (result.status !== 0) {
+			return { error: result.stderr?.trim() || "Failed to read cookie DB" };
+		}
+		const lines = (result.stdout || "").trim().split("\n").filter(Boolean);
+		if (!lines.length) {
+			return { error: "No Claude cookies found in DB" };
+		}
+
+		const password = getChromeSafeStoragePassword();
+		const cookies = {};
+
+		for (const line of lines) {
+			const [name, plainValue, hexValue] = line.split("\t");
+			if (!name) continue;
+			if (plainValue) {
+				const value = extractClaudeCookieValue(plainValue, name);
+				if (value) cookies[name] = value;
+				continue;
+			}
+			if (hexValue) {
+				const buffer = Buffer.from(hexValue, "hex");
+				const decrypted = decryptChromeCookie(buffer, password);
+				const value = extractClaudeCookieValue(decrypted, name);
+				if (value) cookies[name] = value;
+			}
+		}
+
+		return {
+			sessionKey: cookies.sessionKey ?? null,
+			cfClearance: cookies.cf_clearance ?? null,
+			cookies,
+		};
+	} catch (err) {
+		return { error: err?.message ?? String(err) };
+	} finally {
+		try {
+			unlinkSync(tempPath);
+		} catch {
+			// ignore
+		}
+	}
+}
+
+function loadClaudeCookieCandidates() {
+	const overridePath = process.env.CLAUDE_COOKIE_DB_PATH;
+	const candidates = overridePath
+		? [overridePath]
+		: [
+			join(homedir(), ".config", "chromium", "Default", "Cookies"),
+			join(homedir(), ".config", "google-chrome", "Default", "Cookies"),
+			join(homedir(), ".config", "google-chrome-canary", "Default", "Cookies"),
+			join(homedir(), ".config", "google-chrome-for-testing", "Default", "Cookies"),
+		];
+
+	const sessions = [];
+
+	for (const cookiePath of candidates) {
+		if (!existsSync(cookiePath)) continue;
+		const result = readClaudeCookiesFromDb(cookiePath);
+		if (result.sessionKey) {
+			sessions.push({
+				sessionKey: result.sessionKey,
+				cfClearance: result.cfClearance ?? null,
+				cookies: result.cookies ?? null,
+				source: cookiePath,
+			});
+		}
+	}
+
+	return sessions;
+}
+
+function loadClaudeSessionCandidates() {
+	const sessions = [];
+	const cookieSessions = loadClaudeCookieCandidates();
+	const oauth = loadClaudeOAuthToken();
+	for (const session of cookieSessions) {
+		sessions.push({
+			...session,
+			oauthToken: oauth.token ?? null,
+		});
+	}
+
+	const credentialsSession = loadClaudeSessionFromCredentials();
+	if (credentialsSession.sessionKey) {
+		sessions.push({
+			...credentialsSession,
+			oauthToken: oauth.token ?? credentialsSession.sessionKey,
+		});
+	}
+
+	return sessions;
+}
+
+function buildClaudeHeaders(sessionKey, cfClearance, bearerToken, mode, cookies) {
+	const headers = {
+		accept: "application/json, text/plain, */*",
+		"accept-language": "en-US,en;q=0.9",
+		"cache-control": "no-cache",
+		pragma: "no-cache",
+		origin: CLAUDE_ORIGIN,
+		referer: `${CLAUDE_ORIGIN}/`,
+		"user-agent": CLAUDE_USER_AGENT,
+		"sec-fetch-dest": "empty",
+		"sec-fetch-mode": "cors",
+		"sec-fetch-site": "same-origin",
+		"x-requested-with": "XMLHttpRequest",
+	};
+	if (mode.includes("cookie")) {
+		let parts = [];
+		if (cookies && typeof cookies === "object") {
+			parts = Object.entries(cookies)
+				.filter(([, value]) => typeof value === "string" && value.length)
+				.map(([name, value]) => `${name}=${value}`);
+		} else {
+			parts = [`sessionKey=${sessionKey}`];
+			if (cfClearance) {
+				parts.push(`cf_clearance=${cfClearance}`);
+			}
+		}
+		headers.Cookie = parts.join("; ");
+	}
+	if (mode.includes("bearer")) {
+		if (bearerToken) {
+			headers.Authorization = `Bearer ${bearerToken}`;
+		}
+	}
+	return headers;
+}
+
+async function fetchClaudeJson(url, sessionKey, cfClearance, oauthToken, cookies) {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), CLAUDE_TIMEOUT_MS);
+
+	try {
+		const attempts = [
+			{ mode: "cookie", bearer: null },
+			{ mode: "bearer", bearer: sessionKey },
+			{ mode: "bearer", bearer: oauthToken },
+			{ mode: "cookie+bearer", bearer: sessionKey },
+			{ mode: "cookie+bearer", bearer: oauthToken },
+		];
+		let lastError = null;
+
+		for (const attempt of attempts) {
+			const res = await fetch(url, {
+				method: "GET",
+				headers: buildClaudeHeaders(
+					sessionKey,
+					cfClearance,
+					attempt.bearer,
+					attempt.mode,
+					cookies
+				),
+				signal: controller.signal,
+			});
+			if (res.ok) {
+				const text = await res.text();
+				if (!text) {
+					return { data: null };
+				}
+				try {
+					return { data: JSON.parse(text) };
+				} catch {
+					return { error: "Invalid JSON response" };
+				}
+			}
+
+			let detail = "";
+			try {
+				const text = await res.text();
+				if (text) {
+					detail = text.trim().slice(0, 200);
+				}
+			} catch {
+				// ignore body parse errors
+			}
+			const error = {
+				status: res.status,
+				error: detail ? `HTTP ${res.status}: ${detail}` : `HTTP ${res.status}`,
+			};
+			lastError = error;
+			if (res.status !== 401 && res.status !== 403) {
+				return error;
+			}
+		}
+
+		return lastError ?? { error: "HTTP 403" };
+	} catch (err) {
+		const message = err?.name === "AbortError" ? "Request timed out" : err?.message ?? String(err);
+		return { error: message };
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+function extractClaudeOrgId(payload) {
+	if (!payload) return null;
+	if (typeof payload === "string") return payload;
+
+	const isUuidLike = (value) => {
+		if (typeof value !== "string") return false;
+		if (/^[0-9a-f]{32}$/i.test(value)) return true;
+		if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+			return true;
+		}
+		return false;
+	};
+
+	const searchUuid = (root) => {
+		const stack = [root];
+		const seen = new Set();
+		while (stack.length) {
+			const current = stack.pop();
+			if (!current || typeof current !== "object") continue;
+			if (seen.has(current)) continue;
+			seen.add(current);
+			if (Array.isArray(current)) {
+				for (const item of current) {
+					if (isUuidLike(item)) return item;
+					if (item && typeof item === "object") stack.push(item);
+				}
+			} else {
+				for (const value of Object.values(current)) {
+					if (isUuidLike(value)) return value;
+					if (value && typeof value === "object") stack.push(value);
+				}
+			}
+		}
+		return null;
+	};
+
+	const uuidCandidate = searchUuid(payload);
+	if (uuidCandidate) return uuidCandidate;
+
+	const direct = payload.id ?? payload.uuid ?? payload.organizationId ?? payload.orgId ?? payload.org_id;
+	if (direct) return direct;
+	if (payload.current_organization_uuid) return payload.current_organization_uuid;
+
+	const orgs = Array.isArray(payload)
+		? payload
+		: payload.organizations ?? payload.orgs ?? payload.items ?? payload.data;
+
+	if (!Array.isArray(orgs) || orgs.length === 0) return null;
+	const first = orgs[0];
+	if (typeof first === "string") return first;
+	return first?.id ?? first?.uuid ?? first?.organizationId ?? first?.orgId ?? first?.org_id ?? null;
+}
+
+async function fetchClaudeUsage() {
+	const candidates = loadClaudeSessionCandidates();
+	if (!candidates.length) {
+		const credentials = loadClaudeSessionFromCredentials();
+		return {
+			success: false,
+			source: credentials.source,
+			error: credentials.error ?? "Missing Claude session key",
+		};
+	}
+
+	let lastAuthError = null;
+
+	for (const credentials of candidates) {
+		const tryUsageForOrg = async (orgId) => {
+			const normalizedOrgId = normalizeClaudeOrgId(orgId);
+			const usageUrl = `${CLAUDE_API_BASE}/organizations/${normalizedOrgId}/usage`;
+			const overageUrl = `${CLAUDE_API_BASE}/organizations/${normalizedOrgId}/overage_spend_limit`;
+
+			const [usageResponse, overageResponse, accountResponse] = await Promise.all([
+				fetchClaudeJson(
+					usageUrl,
+					credentials.sessionKey,
+					credentials.cfClearance,
+					credentials.oauthToken,
+					credentials.cookies
+				),
+				fetchClaudeJson(
+					overageUrl,
+					credentials.sessionKey,
+					credentials.cfClearance,
+					credentials.oauthToken,
+					credentials.cookies
+				),
+				fetchClaudeJson(
+					CLAUDE_ACCOUNT_URL,
+					credentials.sessionKey,
+					credentials.cfClearance,
+					credentials.oauthToken,
+					credentials.cookies
+				),
+			]);
+
+			const errors = {};
+			if (usageResponse.error) errors.usage = usageResponse.error;
+			if (overageResponse.error) errors.overage = overageResponse.error;
+			if (accountResponse.error) errors.account = accountResponse.error;
+
+			return { usageResponse, overageResponse, accountResponse, errors, orgId };
+		};
+
+		const cookieOrg = credentials.cookies?.lastActiveOrg;
+		if (cookieOrg) {
+			const cookieAttempt = await tryUsageForOrg(cookieOrg);
+			const authErrors = Object.values(cookieAttempt.errors).some(isClaudeAuthError);
+			if (!authErrors) {
+				return {
+					success: true,
+					source: credentials.source,
+					orgId: cookieAttempt.orgId,
+					usage: cookieAttempt.usageResponse.data ?? null,
+					overage: cookieAttempt.overageResponse.data ?? null,
+					account: cookieAttempt.accountResponse.data ?? null,
+					errors: Object.keys(cookieAttempt.errors).length ? cookieAttempt.errors : null,
+				};
+			}
+			lastAuthError = cookieAttempt.errors.usage || cookieAttempt.errors.overage || lastAuthError;
+		}
+
+		const orgsResponse = await fetchClaudeJson(
+			CLAUDE_ORGS_URL,
+			credentials.sessionKey,
+			credentials.cfClearance,
+			credentials.oauthToken,
+		credentials.cookies
+	);
+		if (orgsResponse.error) {
+			const errorText = String(orgsResponse.error);
+			const isAuthError = /account_session_invalid|invalid authorization|http 401|http 403/i.test(errorText);
+			if (isAuthError) {
+				lastAuthError = orgsResponse.error;
+				continue;
+			}
+			return {
+				success: false,
+				source: credentials.source,
+				error: `Organizations request failed: ${orgsResponse.error}`,
+			};
+		}
+
+		const orgId = extractClaudeOrgId(orgsResponse.data);
+		if (!orgId) {
+			return {
+				success: false,
+				source: credentials.source,
+				error: "No Claude organization ID found",
+			};
+		}
+
+		const orgAttempt = await tryUsageForOrg(orgId);
+		const authErrors = Object.values(orgAttempt.errors).some(isClaudeAuthError);
+		if (!authErrors) {
+			return {
+				success: true,
+				source: credentials.source,
+				orgId,
+				usage: orgAttempt.usageResponse.data ?? null,
+				overage: orgAttempt.overageResponse.data ?? null,
+				account: orgAttempt.accountResponse.data ?? null,
+				errors: Object.keys(orgAttempt.errors).length ? orgAttempt.errors : null,
+			};
+		}
+		lastAuthError = orgAttempt.errors.usage || orgAttempt.errors.overage || lastAuthError;
+	}
+
+	return {
+		success: false,
+		source: candidates[0]?.source ?? null,
+		error: `Organizations request failed: ${lastAuthError || "Invalid authorization"}`,
+	};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Display formatting
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -514,6 +1130,19 @@ function formatPercent(used, remaining) {
 	if (remaining !== undefined) return `${Math.round(remaining)}% left`;
 	if (used !== undefined) return `${Math.round(100 - used)}% left`;
 	return null;
+}
+
+function normalizeClaudeOrgId(orgId) {
+	if (!orgId || typeof orgId !== "string") return orgId;
+	if (/^[0-9a-f-]{36}$/i.test(orgId)) {
+		return orgId.replace(/-/g, "");
+	}
+	return orgId;
+}
+
+function isClaudeAuthError(error) {
+	if (!error) return false;
+	return /account_session_invalid|invalid authorization|http 401|http 403/i.test(String(error));
 }
 
 function formatResetTime(seconds, style = "parentheses") {
@@ -701,6 +1330,230 @@ function buildAccountUsageLines(account, payload) {
 	return lines;
 }
 
+function formatClaudePercentLeft(percentLeft) {
+	if (percentLeft === null || percentLeft === undefined || Number.isNaN(percentLeft)) {
+		return "?";
+	}
+	return `${Math.round(percentLeft)}% left`;
+}
+
+function normalizePercentUsed(value) {
+	if (value === null || value === undefined || Number.isNaN(value)) return null;
+	let used = Number(value);
+	if (used <= 1 && used >= 0) {
+		used *= 100;
+	}
+	if (!Number.isFinite(used)) return null;
+	return Math.min(100, Math.max(0, used));
+}
+
+function parseClaudeUtilizationWindow(window) {
+	if (!window || typeof window !== "object") return null;
+	const utilization = window.utilization ?? window.used_percent ?? window.usedPercent ?? window.percent_used;
+	const remainingPercent = window.remaining_percent ?? window.remainingPercent ?? window.percent_remaining;
+	const resetsAt = window.resets_at ?? window.resetsAt ?? window.reset_at ?? window.resetAt;
+	let remaining = null;
+	if (remainingPercent !== undefined) {
+		remaining = Number(remainingPercent);
+	} else {
+		const used = normalizePercentUsed(utilization);
+		if (used !== null) {
+			remaining = 100 - used;
+		}
+	}
+	if (remaining !== null && Number.isFinite(remaining)) {
+		remaining = Math.min(100, Math.max(0, remaining));
+	}
+	return { remaining, resetsAt };
+}
+
+function formatResetAt(dateString) {
+	if (!dateString) return "";
+	const date = new Date(dateString);
+	if (Number.isNaN(date.getTime())) return "";
+	const seconds = Math.max(0, Math.floor((date.getTime() - Date.now()) / 1000));
+	return formatResetTime(seconds, "inline");
+}
+
+function parseClaudeWindow(window) {
+	if (!window || typeof window !== "object") return null;
+	const usedPercent = window.used_percent ?? window.usedPercent ?? window.percent_used ?? window.percentUsed;
+	const remainingPercent = window.remaining_percent ?? window.remainingPercent ?? window.percent_remaining ?? window.percentRemaining;
+	const used = window.used ?? window.used_units ?? window.usedUnits ?? window.used_tokens ?? window.usedTokens;
+	const remaining = window.remaining ?? window.remaining_units ?? window.remainingUnits ?? window.remaining_tokens ?? window.remainingTokens;
+	const limit = window.limit ?? window.quota ?? window.total ?? window.max ?? window.maximum;
+	const resets = window.resets_at ?? window.resetsAt ?? window.reset_at ?? window.resetAt ?? window.reset;
+	const resetAfterSeconds = window.reset_after_seconds ?? window.resetAfterSeconds;
+
+	let percentLeft = null;
+	if (remainingPercent !== undefined) {
+		percentLeft = remainingPercent;
+	} else if (usedPercent !== undefined) {
+		percentLeft = 100 - usedPercent;
+	} else if (remaining !== undefined && Number.isFinite(limit) && limit > 0) {
+		percentLeft = (remaining / limit) * 100;
+	} else if (used !== undefined && Number.isFinite(limit) && limit > 0) {
+		percentLeft = (1 - used / limit) * 100;
+	}
+
+	return { percentLeft, used, remaining, limit, resets, resetAfterSeconds };
+}
+
+function formatClaudeLabel(label) {
+	if (!label) return "";
+	return label
+		.replace(/_/g, " ")
+		.replace(/(^|\s)\S/g, (m) => m.toUpperCase())
+		.trim();
+}
+
+function getClaudeUsageWindows(usage) {
+	if (!usage || typeof usage !== "object") return [];
+	const root = usage.usage ?? usage.quotas ?? usage.quota ?? usage;
+	const windows = [];
+
+	const seen = new Set();
+	const pushWindow = (label, window) => {
+		if (!window || typeof window !== "object") return;
+		if (seen.has(label)) return;
+		seen.add(label);
+		windows.push({ label, window });
+	};
+
+	pushWindow("Session", root.session ?? root.sessions ?? root.fiveHour ?? root.five_hour ?? root.primary);
+	pushWindow("Weekly", root.weekly ?? root.week ?? root.secondary);
+
+	const modelContainer = root.models ?? root.model ?? root.usage_by_model ?? root.model_usage;
+	if (modelContainer && typeof modelContainer === "object" && !Array.isArray(modelContainer)) {
+		for (const [key, value] of Object.entries(modelContainer)) {
+			pushWindow(formatClaudeLabel(key), value);
+		}
+	}
+
+	pushWindow("Opus", root.opus ?? root.model_opus ?? root.claude_opus);
+
+	return windows;
+}
+
+function formatClaudeOverageLine(overage) {
+	if (!overage || typeof overage !== "object") return null;
+	const limit = overage.limit ?? overage.spend_limit ?? overage.spendLimit ?? overage.overage_spend_limit;
+	const used = overage.used ?? overage.spent ?? overage.spend ?? overage.amount_used;
+	const remaining = overage.remaining ?? (limit !== undefined && used !== undefined ? limit - used : undefined);
+	const enabled = overage.enabled ?? overage.is_enabled ?? overage.active;
+
+	const parts = [];
+	if (enabled !== undefined) {
+		parts.push(enabled ? "enabled" : "disabled");
+	}
+	if (limit !== undefined) {
+		parts.push(`limit ${limit}`);
+	}
+	if (remaining !== undefined) {
+		parts.push(`remaining ${remaining}`);
+	}
+	if (!parts.length) return null;
+	return `Overage: ${parts.join(", ")}`;
+}
+
+function buildClaudeUsageLines(payload) {
+	const lines = [];
+
+	const account = payload?.account ?? {};
+	const email = account.email ?? account.email_address ?? account?.user?.email ?? account?.account?.email ?? null;
+	const membership = Array.isArray(account.memberships)
+		? account.memberships.find(m => normalizeClaudeOrgId(m?.organization?.uuid) === normalizeClaudeOrgId(payload?.orgId))
+		: null;
+	const plan = account.plan
+		?? account.plan_type
+		?? account.planType
+		?? account?.subscription?.plan
+		?? membership?.organization?.rate_limit_tier
+		?? (membership?.organization?.capabilities?.includes("claude_max") ? "claude_max" : null);
+	let planDisplay = null;
+	if (plan) {
+		planDisplay = formatClaudeLabel(
+			String(plan)
+				.replace(/^default_/, "")
+				.replace(/_\\d+x$/i, "")
+		);
+	}
+	const header = `Claude${email ? ` <${email}>` : ""}${planDisplay ? ` (${planDisplay})` : ""}`;
+
+	lines.push(header);
+	lines.push("");
+
+	if (!payload || payload.success === false) {
+		lines.push(`Error: ${payload?.error ?? "Claude usage unavailable"}`);
+		return lines;
+	}
+
+	const usage = payload?.usage;
+	let renderedUsage = false;
+	if (usage && typeof usage === "object") {
+		const fiveHour = parseClaudeUtilizationWindow(usage.five_hour ?? usage.fiveHour);
+		if (fiveHour && fiveHour.remaining !== null) {
+			const reset = formatResetAt(fiveHour.resetsAt);
+			lines.push(`5h limit:     ${printBar(fiveHour.remaining)} ${Math.round(fiveHour.remaining)}% left ${reset}`.trimEnd());
+			renderedUsage = true;
+		}
+		const weekly = parseClaudeUtilizationWindow(usage.seven_day ?? usage.sevenDay);
+		if (weekly && weekly.remaining !== null) {
+			const reset = formatResetAt(weekly.resetsAt);
+			lines.push(`Weekly limit: ${printBar(weekly.remaining)} ${Math.round(weekly.remaining)}% left ${reset}`.trimEnd());
+			renderedUsage = true;
+		}
+		const opus = parseClaudeUtilizationWindow(usage.seven_day_opus ?? usage.sevenDayOpus);
+		if (opus && opus.remaining !== null) {
+			const reset = formatResetAt(opus.resetsAt);
+			lines.push(`Opus weekly:  ${printBar(opus.remaining)} ${Math.round(opus.remaining)}% left ${reset}`.trimEnd());
+			renderedUsage = true;
+		}
+		const sonnet = parseClaudeUtilizationWindow(usage.seven_day_sonnet ?? usage.sevenDaySonnet);
+		if (sonnet && sonnet.remaining !== null) {
+			const reset = formatResetAt(sonnet.resetsAt);
+			lines.push(`Sonnet weekly: ${printBar(sonnet.remaining)} ${Math.round(sonnet.remaining)}% left ${reset}`.trimEnd());
+			renderedUsage = true;
+		}
+	}
+
+	if (!renderedUsage) {
+		const windows = getClaudeUsageWindows(payload.usage);
+		if (windows.length) {
+			for (const { label, window } of windows) {
+				const parsed = parseClaudeWindow(window);
+				if (!parsed) continue;
+				const reset = parsed.resetAfterSeconds
+					? formatResetTime(parsed.resetAfterSeconds)
+					: parsed.resets ? `(resets ${parsed.resets})` : "";
+				lines.push(`  ${label}: ${formatClaudePercentLeft(parsed.percentLeft)} ${reset}`.trimEnd());
+			}
+		} else {
+			lines.push("  Usage: (no usage data)");
+		}
+	}
+
+	const overageLine = formatClaudeOverageLine(payload.overage);
+	if (overageLine) {
+		lines.push(`  ${overageLine}`);
+	}
+
+	if (payload.orgId) {
+		lines.push(`  Org: ${payload.orgId}`);
+	}
+
+	if (payload.source) {
+		lines.push(`  Source: ${shortenPath(payload.source)}`);
+	}
+
+	if (payload.errors) {
+		const parts = Object.entries(payload.errors).map(([key, value]) => `${key}=${value}`);
+		lines.push(`  Partial errors: ${parts.join(", ")}`);
+	}
+
+	return lines;
+}
+
 function printHelp() {
 	console.log(`${PRIMARY_CMD} - Manage and monitor OpenAI Codex accounts
 
@@ -718,6 +1571,7 @@ Options:
   --json            Output in JSON format
   --no-browser      Print auth URL instead of opening browser
   --no-color        Disable colored output
+  --claude          Include Claude Code usage (uses ~/.claude/.credentials.json)
   --version, -v     Show version number
   --help, -h        Show this help
 
@@ -822,6 +1676,7 @@ Usage:
 
 Options:
   --json            Output in JSON format
+  --claude          Include Claude Code usage (uses ~/.claude/.credentials.json)
   --help, -h        Show this help
 
 Description:
@@ -901,6 +1756,8 @@ Description:
   - Weekly usage (queries per 7-day period)
   - Available credits
 
+  With --claude, also shows Claude Code subscription usage.
+
   Tokens are automatically refreshed if expired.
 
 Examples:
@@ -908,6 +1765,7 @@ Examples:
   ${PRIMARY_CMD} personal                Check "personal" account only
   ${PRIMARY_CMD} quota --json            JSON output for all accounts
   ${PRIMARY_CMD} quota work --json       JSON output for "work" account
+  ${PRIMARY_CMD} --claude                Include Claude Code usage
 `);
 }
 
@@ -1489,12 +2347,7 @@ async function handleAdd(args, flags) {
 			mkdirSync(dir, { recursive: true });
 		}
 		
-		const tempPath = `${targetPath}.tmp`;
-		writeFileSync(tempPath, JSON.stringify({ accounts }, null, 2) + "\n", "utf-8");
-		
-		// Set permissions to 0600 (owner read/write only) before rename
-		chmodSync(tempPath, 0o600);
-		renameSync(tempPath, targetPath);
+		writeFileAtomic(targetPath, JSON.stringify({ accounts }, null, 2) + "\n", { mode: 0o600 });
 		
 		// 16. Print success message (human-readable OR JSON, not both)
 		if (flags.json) {
@@ -1601,9 +2454,10 @@ async function handleSwitch(args, flags) {
 		
 		// 4. Read existing ~/.codex/auth.json to preserve OPENAI_API_KEY
 		let existingAuth = {};
-		if (existsSync(CODEX_CLI_AUTH_PATH)) {
+		const codexAuthPath = getCodexCliAuthPath();
+		if (existsSync(codexAuthPath)) {
 			try {
-				const raw = readFileSync(CODEX_CLI_AUTH_PATH, "utf-8");
+				const raw = readFileSync(codexAuthPath, "utf-8");
 				existingAuth = JSON.parse(raw);
 			} catch {
 				// If corrupted, start fresh
@@ -1634,16 +2488,13 @@ async function handleSwitch(args, flags) {
 		};
 		
 		// 6. Create ~/.codex directory if needed
-		const codexDir = dirname(CODEX_CLI_AUTH_PATH);
+		const codexDir = dirname(codexAuthPath);
 		if (!existsSync(codexDir)) {
 			mkdirSync(codexDir, { recursive: true });
 		}
 		
 		// 7. Write auth.json atomically (temp file + rename) with 0600 permissions
-		const tempPath = `${CODEX_CLI_AUTH_PATH}.tmp`;
-		writeFileSync(tempPath, JSON.stringify(newAuth, null, 2) + "\n", "utf-8");
-		chmodSync(tempPath, 0o600);
-		renameSync(tempPath, CODEX_CLI_AUTH_PATH);
+		writeFileAtomic(codexAuthPath, JSON.stringify(newAuth, null, 2) + "\n", { mode: 0o600 });
 		
 		// 8. Update OpenCode auth.json if present
 		const opencodeUpdate = updateOpencodeAuth(account);
@@ -1661,7 +2512,7 @@ async function handleSwitch(args, flags) {
 				label: label,
 				email: profile.email,
 				accountId: account.accountId,
-				authPath: CODEX_CLI_AUTH_PATH,
+				authPath: codexAuthPath,
 			};
 			if (opencodeUpdate.updated) {
 				output.opencodeAuthPath = opencodeUpdate.path;
@@ -1675,7 +2526,7 @@ async function handleSwitch(args, flags) {
 			const lines = [
 				colorize(`Switched to ${label}${emailDisplay}${planDisplay}`, GREEN),
 				"",
-				`Codex CLI: ${shortenPath(CODEX_CLI_AUTH_PATH)}`,
+				`Codex CLI: ${shortenPath(codexAuthPath)}`,
 			];
 			if (opencodeUpdate.updated) {
 				lines.push(`OpenCode:  ${shortenPath(opencodeUpdate.path)}`);
@@ -1702,10 +2553,11 @@ async function handleSwitch(args, flags) {
  * @returns {string | null} Active account ID or null if not found
  */
 function getActiveAccountId() {
-	if (!existsSync(CODEX_CLI_AUTH_PATH)) return null;
+	const codexAuthPath = getCodexCliAuthPath();
+	if (!existsSync(codexAuthPath)) return null;
 	
 	try {
-		const raw = readFileSync(CODEX_CLI_AUTH_PATH, "utf-8");
+		const raw = readFileSync(codexAuthPath, "utf-8");
 		const parsed = JSON.parse(raw);
 		const tokens = parsed?.tokens;
 		if (tokens?.access_token) {
@@ -1723,12 +2575,13 @@ function getActiveAccountId() {
  * @returns {{ accountId: string | null, trackedLabel: string | null, source: "codex-quota" | "native" | null }}
  */
 function getActiveAccountInfo() {
-	if (!existsSync(CODEX_CLI_AUTH_PATH)) {
+	const codexAuthPath = getCodexCliAuthPath();
+	if (!existsSync(codexAuthPath)) {
 		return { accountId: null, trackedLabel: null, source: null };
 	}
 	
 	try {
-		const raw = readFileSync(CODEX_CLI_AUTH_PATH, "utf-8");
+		const raw = readFileSync(codexAuthPath, "utf-8");
 		const parsed = JSON.parse(raw);
 		const tokens = parsed?.tokens;
 		const trackedLabel = parsed?.codex_quota_label ?? null;
@@ -1817,7 +2670,7 @@ async function handleList(flags) {
 		for (const p of MULTI_ACCOUNT_PATHS) {
 			console.log(`  - ${p}`);
 		}
-		console.log(`  - ${CODEX_CLI_AUTH_PATH}`);
+		console.log(`  - ${getCodexCliAuthPath()}`);
 		console.log(`\nRun '${PRIMARY_CMD} add' to add an account via OAuth.`);
 		return;
 	}
@@ -2008,7 +2861,8 @@ async function handleRemove(args, flags) {
 	}
 	
 	// Handle Codex CLI auth.json (single account file)
-	if (source === CODEX_CLI_AUTH_PATH) {
+	const codexAuthPath = getCodexCliAuthPath();
+	if (source === codexAuthPath) {
 		if (!flags.json) {
 			console.log(colorize("Warning: This will clear your Codex CLI authentication.", YELLOW));
 			console.log(`You will need to re-authenticate using 'codex auth' or '${PRIMARY_CMD} add'.`);
@@ -2021,19 +2875,19 @@ async function handleRemove(args, flags) {
 		
 		// Delete the auth.json file
 		try {
-			unlinkSync(CODEX_CLI_AUTH_PATH);
+			unlinkSync(codexAuthPath);
 			if (flags.json) {
 				console.log(JSON.stringify({ 
 					success: true, 
 					label, 
-					source: shortenPath(source),
+					source: shortenPath(codexAuthPath),
 					message: "Codex CLI auth cleared" 
 				}, null, 2));
 			} else {
 				const lines = [
 					colorize(`Removed account ${label}`, GREEN),
 					"",
-					`Deleted: ${shortenPath(source)}`,
+					`Deleted: ${shortenPath(codexAuthPath)}`,
 				];
 				console.log(drawBox(lines).join("\n"));
 			}
@@ -2115,11 +2969,8 @@ async function handleRemove(args, flags) {
 			}
 		} else {
 			// Write updated accounts atomically
-			const tempPath = source + ".tmp";
 			const output = { accounts: updatedAccounts };
-			writeFileSync(tempPath, JSON.stringify(output, null, 2) + "\n");
-			chmodSync(tempPath, 0o600);
-			renameSync(tempPath, source);
+			writeFileAtomic(source, JSON.stringify(output, null, 2) + "\n", { mode: 0o600 });
 			
 			if (flags.json) {
 				console.log(JSON.stringify({ 
@@ -2150,13 +3001,15 @@ async function handleRemove(args, flags) {
 /**
  * Handle quota subcommand (default behavior)
  * @param {string[]} args - Non-flag arguments (e.g., label filter)
- * @param {{ json: boolean }} flags - Parsed flags
+ * @param {{ json: boolean, claude?: boolean }} flags - Parsed flags
  */
 async function handleQuota(args, flags) {
 	const labelFilter = args[0];
-	
+	const includeClaude = Boolean(flags.claude);
 	const allAccounts = loadAccounts();
-	if (!allAccounts.length) {
+	const hasOpenAiAccounts = allAccounts.length > 0;
+
+	if (!hasOpenAiAccounts && !includeClaude) {
 		if (flags.json) {
 			console.log(JSON.stringify({ 
 				success: false, 
@@ -2164,7 +3017,7 @@ async function handleQuota(args, flags) {
 				searchedLocations: [
 					"CODEX_ACCOUNTS env var",
 					...MULTI_ACCOUNT_PATHS,
-					CODEX_CLI_AUTH_PATH,
+					getCodexCliAuthPath(),
 				],
 			}, null, 2));
 		} else {
@@ -2174,32 +3027,47 @@ async function handleQuota(args, flags) {
 			for (const p of MULTI_ACCOUNT_PATHS) {
 				console.error(`  - ${p}`);
 			}
-			console.error(`  - ${CODEX_CLI_AUTH_PATH}`);
+			console.error(`  - ${getCodexCliAuthPath()}`);
 			console.error("\nRun 'codex-quota.js --help' for account format.");
 		}
 		process.exit(1);
 	}
-	
-	const accounts = labelFilter 
-		? allAccounts.filter(a => a.label === labelFilter)
-		: allAccounts;
-	
+
+	let accounts = [];
+	if (hasOpenAiAccounts) {
+		accounts = labelFilter 
+			? allAccounts.filter(a => a.label === labelFilter)
+			: allAccounts;
+	}
+
 	if (labelFilter && !accounts.length) {
-		if (flags.json) {
-			console.log(JSON.stringify({ 
-				success: false, 
-				error: `Account "${labelFilter}" not found`,
-				availableLabels: allAccounts.map(a => a.label),
-			}, null, 2));
+		if (hasOpenAiAccounts) {
+			if (flags.json) {
+				console.log(JSON.stringify({ 
+					success: false, 
+					error: `Account "${labelFilter}" not found`,
+					availableLabels: allAccounts.map(a => a.label),
+				}, null, 2));
+			} else {
+				console.error(colorize(`Account "${labelFilter}" not found.`, RED));
+				console.error("Available:", allAccounts.map(a => a.label).join(", "));
+			}
 		} else {
-			console.error(colorize(`Account "${labelFilter}" not found.`, RED));
-			console.error("Available:", allAccounts.map(a => a.label).join(", "));
+			if (flags.json) {
+				console.log(JSON.stringify({ 
+					success: false, 
+					error: `No OpenAI accounts found for "${labelFilter}"`,
+				}, null, 2));
+			} else {
+				console.error(colorize(`No OpenAI accounts found for "${labelFilter}".`, RED));
+				console.error("Add an account with 'codex-quota add' or omit the label.");
+			}
 		}
 		process.exit(1);
 	}
-	
+
 	const results = [];
-	
+
 	for (const account of accounts) {
 		const tokenOk = await ensureFreshToken(account, allAccounts);
 		if (!tokenOk) {
@@ -2209,9 +3077,14 @@ async function handleQuota(args, flags) {
 		const usage = await fetchUsage(account);
 		results.push({ account, usage });
 	}
-	
+
+	let claudeResult = null;
+	if (includeClaude) {
+		claudeResult = await fetchClaudeUsage();
+	}
+
 	if (flags.json) {
-		const output = results.map(({ account, usage }) => {
+		const openaiOutput = results.map(({ account, usage }) => {
 			const profile = extractProfile(account.access);
 			return {
 				label: account.label,
@@ -2222,12 +3095,25 @@ async function handleQuota(args, flags) {
 				source: account.source,
 			};
 		});
-		console.log(JSON.stringify(output, null, 2));
+		if (includeClaude) {
+			console.log(JSON.stringify({
+				openai: openaiOutput,
+				claude: claudeResult,
+			}, null, 2));
+			return;
+		}
+		console.log(JSON.stringify(openaiOutput, null, 2));
 		return;
 	}
-	
+
 	for (const { account, usage } of results) {
 		const lines = buildAccountUsageLines(account, usage);
+		const boxLines = drawBox(lines);
+		console.log(boxLines.join("\n"));
+	}
+
+	if (includeClaude) {
+		const lines = buildClaudeUsageLines(claudeResult);
 		const boxLines = drawBox(lines);
 		console.log(boxLines.join("\n"));
 	}
@@ -2245,6 +3131,7 @@ async function main() {
 		json: args.includes("--json"),
 		noBrowser: args.includes("--no-browser"),
 		noColor: args.includes("--no-color"),
+		claude: args.includes("--claude"),
 	};
 	
 	// Set global noColorFlag for supportsColor() function
