@@ -38,6 +38,7 @@ import {
 	loadAllClaudeOAuthAccounts,
 	fetchClaudeOAuthUsage,
 	fetchClaudeOAuthUsageForAccount,
+	persistClaudeOAuthTokens,
 	// OpenAI OAuth utilities
 	generatePKCE,
 	generateState,
@@ -67,6 +68,7 @@ import {
 	MULTI_ACCOUNT_PATHS,
 	CODEX_CLI_AUTH_PATH,
 	PRIMARY_CMD,
+	CLAUDE_MULTI_ACCOUNT_PATHS,
 	printHelp,
 	printHelpAdd,
 	printHelpSwitch,
@@ -254,7 +256,7 @@ describe("README documentation", () => {
 	});
 
 	test("documents OpenCode integration", () => {
-		expect(readme).toContain("Switch the active account for both Codex CLI and OpenCode");
+		expect(readme).toContain("Switch the active account for Codex CLI, OpenCode, and pi");
 	});
 
 	test("documents OpenCode auth path", () => {
@@ -876,18 +878,172 @@ describe("loadAllClaudeOAuthAccounts", () => {
 });
 
 describe("fetchClaudeOAuthUsageForAccount", () => {
-	test("returns error when token is expired", async () => {
+	let originalFetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	test("refreshes token when expiring soon", async () => {
+		globalThis.fetch = async (url, options) => {
+			if (url === "https://console.anthropic.com/v1/oauth/token") {
+				const body = JSON.parse(options.body);
+				expect(body.grant_type).toBe("refresh_token");
+				expect(body.refresh_token).toBe("sk-ant-ort-old");
+				return new Response(JSON.stringify({
+					access_token: "sk-ant-oat-new",
+					refresh_token: "sk-ant-ort-new",
+					expires_in: 3600,
+				}), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url === "https://api.anthropic.com/api/oauth/usage") {
+				expect(options.headers.Authorization).toBe("Bearer sk-ant-oat-new");
+				return new Response(JSON.stringify({
+					five_hour: { utilization: 0.1 },
+				}), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response("Not found", { status: 404 });
+		};
+
+		const account = {
+			label: "expiring-account",
+			accessToken: "sk-ant-oat-old",
+			refreshToken: "sk-ant-ort-old",
+			expiresAt: Date.now() + 1000,
+			source: "test",
+		};
+
+		const result = await fetchClaudeOAuthUsageForAccount(account);
+		expect(result.success).toBe(true);
+		expect(result.usage).toBeDefined();
+		expect(account.accessToken).toBe("sk-ant-oat-new");
+		expect(account.refreshToken).toBe("sk-ant-ort-new");
+	});
+
+	test("returns error when token is expired without refresh token", async () => {
 		const account = {
 			label: "expired-account",
 			accessToken: "sk-ant-oat-expired",
-			expiresAt: Date.now() - 1000, // Expired 1 second ago
+			expiresAt: Date.now() - 1000,
 			source: "test",
 		};
 
 		const result = await fetchClaudeOAuthUsageForAccount(account);
 		expect(result.success).toBe(false);
 		expect(result.error).toContain("expired");
+		expect(result.error).toContain("refresh token");
 		expect(result.label).toBe("expired-account");
+	});
+});
+
+describe("persistClaudeOAuthTokens", () => {
+	const testDir = join(tmpdir(), "codex-quota-claude-refresh-" + Date.now());
+	const credentialsPath = join(testDir, ".credentials.json");
+	const opencodeAuthPath = join(testDir, "opencode", "auth.json");
+	const claudeAccountsPath = CLAUDE_MULTI_ACCOUNT_PATHS[0];
+	let originalCredentialsEnv;
+	let originalXdgEnv;
+	let originalClaudeAccounts;
+
+	beforeEach(() => {
+		mkdirSync(join(testDir, "opencode"), { recursive: true });
+		originalCredentialsEnv = process.env.CLAUDE_CREDENTIALS_PATH;
+		originalXdgEnv = process.env.XDG_DATA_HOME;
+		process.env.CLAUDE_CREDENTIALS_PATH = credentialsPath;
+		process.env.XDG_DATA_HOME = testDir;
+		originalClaudeAccounts = existsSync(claudeAccountsPath)
+			? readFileSync(claudeAccountsPath, "utf-8")
+			: null;
+	});
+
+	afterEach(() => {
+		rmSync(testDir, { recursive: true, force: true });
+		if (originalCredentialsEnv === undefined) {
+			delete process.env.CLAUDE_CREDENTIALS_PATH;
+		} else {
+			process.env.CLAUDE_CREDENTIALS_PATH = originalCredentialsEnv;
+		}
+		if (originalXdgEnv === undefined) {
+			delete process.env.XDG_DATA_HOME;
+		} else {
+			process.env.XDG_DATA_HOME = originalXdgEnv;
+		}
+		if (originalClaudeAccounts === null) {
+			if (existsSync(claudeAccountsPath)) {
+				rmSync(claudeAccountsPath, { force: true });
+			}
+		} else {
+			writeFileSync(claudeAccountsPath, originalClaudeAccounts);
+		}
+	});
+
+	test("updates matching stores", () => {
+		const credentialsPayload = {
+			claudeAiOauth: {
+				accessToken: "sk-ant-oat-old",
+				refreshToken: "sk-ant-ort-old",
+				expiresAt: Date.now() + 60000,
+				scopes: ["user:profile"],
+			},
+		};
+		writeFileSync(credentialsPath, JSON.stringify(credentialsPayload));
+
+		const opencodePayload = {
+			anthropic: {
+				access: "sk-ant-oat-old",
+				refresh: "sk-ant-ort-old",
+				expires: Date.now() + 60000,
+			},
+		};
+		writeFileSync(opencodeAuthPath, JSON.stringify(opencodePayload));
+
+		const claudeAccountsPayload = {
+			accounts: [
+				{ label: "work", oauthToken: "sk-ant-oat-old", oauthRefreshToken: "sk-ant-ort-old" },
+				{ label: "other", oauthToken: "sk-ant-oat-keep" },
+			],
+		};
+		writeFileSync(claudeAccountsPath, JSON.stringify(claudeAccountsPayload));
+
+		const account = {
+			label: "work",
+			accessToken: "sk-ant-oat-new",
+			refreshToken: "sk-ant-ort-new",
+			expiresAt: 1234567890,
+			scopes: ["user:profile"],
+			source: "test",
+		};
+
+		const result = persistClaudeOAuthTokens(account, {
+			previousAccessToken: "sk-ant-oat-old",
+			previousRefreshToken: "sk-ant-ort-old",
+		});
+		expect(result.updatedPaths.length).toBeGreaterThan(0);
+
+		const updatedCredentials = JSON.parse(readFileSync(credentialsPath, "utf-8"));
+		expect(updatedCredentials.claudeAiOauth.accessToken).toBe("sk-ant-oat-new");
+		expect(updatedCredentials.claudeAiOauth.refreshToken).toBe("sk-ant-ort-new");
+
+		const updatedOpencode = JSON.parse(readFileSync(opencodeAuthPath, "utf-8"));
+		expect(updatedOpencode.anthropic.access).toBe("sk-ant-oat-new");
+		expect(updatedOpencode.anthropic.refresh).toBe("sk-ant-ort-new");
+
+		const updatedClaudeAccounts = JSON.parse(readFileSync(claudeAccountsPath, "utf-8"));
+		const updatedAccount = updatedClaudeAccounts.accounts.find(entry => entry.label === "work");
+		expect(updatedAccount.oauthToken).toBe("sk-ant-oat-new");
+		expect(updatedAccount.oauthRefreshToken).toBe("sk-ant-ort-new");
+		const untouchedAccount = updatedClaudeAccounts.accounts.find(entry => entry.label === "other");
+		expect(untouchedAccount.oauthToken).toBe("sk-ant-oat-keep");
 	});
 });
 
@@ -2055,7 +2211,7 @@ describe("handleSwitch", () => {
 			expect(e.message).toContain("process.exit(1)");
 		}
 		expect(exitCode).toBe(1);
-		expect(consoleOutput.error.join("\n")).toContain("Usage: codex-quota switch <label>");
+		expect(consoleOutput.error.join("\n")).toContain("Usage: codex-quota codex switch <label>");
 	});
 
 	test("exits with JSON error when no label provided and --json flag set", async () => {
@@ -2288,7 +2444,7 @@ describe("handleRemove", () => {
 			expect(e.message).toContain("process.exit(1)");
 		}
 		expect(exitCode).toBe(1);
-		expect(consoleOutput.error.join("\n")).toContain("Usage: codex-quota remove <label>");
+		expect(consoleOutput.error.join("\n")).toContain("Usage: codex-quota codex remove <label>");
 	});
 
 	test("exits with JSON error when no label provided and --json flag set", async () => {
