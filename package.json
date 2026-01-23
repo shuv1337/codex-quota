@@ -1,6 +1,6 @@
 {
   "name": "codex-quota",
-  "version": "1.1.5",
+  "version": "1.1.10",
   "description": "Multi-account manager for OpenAI Codex CLI and OpenCode with OAuth browser authentication",
   "type": "module",
   "repository": {
