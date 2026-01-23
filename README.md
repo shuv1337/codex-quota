@@ -22,7 +22,7 @@ After installation, both `codex-quota` and `cq` commands are available.
 
 ```bash
 # Add a new account (opens browser for OAuth)
-codex-quota add personal
+codex-quota codex add personal
 
 # Add a Claude credential (interactive)
 codex-quota claude add work
@@ -30,37 +30,53 @@ codex-quota claude add work
 # Check quota for all accounts
 codex-quota
 
-# Switch active account
-codex-quota switch personal
+# Switch active Codex account
+codex-quota codex switch personal
 
-# List all accounts
-codex-quota list
+# Switch Claude credentials
+codex-quota claude switch work
+
+# List accounts
+codex-quota codex list
+codex-quota claude list
 
 # Remove an account
-codex-quota remove old-account
+codex-quota codex remove old-account
+codex-quota claude remove old-account
 ```
 
 ## Commands
 
-### quota (default)
+Run `codex-quota` with no namespace to check combined Codex + Claude usage.
 
-Check usage quota for accounts.
+### codex quota
+
+Check usage quota for Codex accounts.
 
 ```bash
-codex-quota                    # All accounts
-codex-quota personal           # Specific account
-codex-quota --json             # JSON output
-codex-quota --claude           # Include Claude Code usage
+codex-quota codex quota            # All Codex accounts
+codex-quota codex quota personal   # Specific account
+codex-quota codex quota --json     # JSON output
 ```
 
-### add
+### claude quota
 
-Add a new account via OAuth browser authentication.
+Check usage quota for Claude accounts.
 
 ```bash
-codex-quota add                # Label derived from email
-codex-quota add work           # With explicit label
-codex-quota add --no-browser   # Print URL (for SSH/headless)
+codex-quota claude quota           # All Claude accounts
+codex-quota claude quota work      # Specific credential
+codex-quota claude quota --json    # JSON output
+```
+
+### codex add
+
+Add a new Codex account via OAuth browser authentication.
+
+```bash
+codex-quota codex add                # Label derived from email
+codex-quota codex add work           # With explicit label
+codex-quota codex add --no-browser   # Print URL (for SSH/headless)
 ```
 
 ### claude add
@@ -73,28 +89,35 @@ codex-quota claude add work          # With explicit label
 codex-quota claude add work --json   # JSON output
 ```
 
-### switch
+### codex switch
 
-Switch the active account for both Codex CLI and OpenCode.
+Switch the active account for Codex CLI, OpenCode, and pi.
 
 ```bash
-codex-quota switch personal
+codex-quota codex switch personal
 ```
 
-When you run `switch`:
+When you run `codex switch`:
 
 1. **Codex CLI** - Updates `~/.codex/auth.json` with the selected account tokens
 2. **OpenCode** - If `~/.local/share/opencode/auth.json` exists, updates the `openai` provider entry
+3. **pi** - If `~/.pi/agent/auth.json` exists, updates the `openai-codex` provider entry
 
-This enables seamless switching between both tools using a single command. Your credentials stay in sync automatically.
+### claude switch
 
-### list
-
-List all accounts from all sources with status indicators.
+Switch Claude Code, OpenCode, and pi to a stored Claude credential.
 
 ```bash
-codex-quota list
-codex-quota list --json
+codex-quota claude switch work
+```
+
+### codex list
+
+List all Codex accounts from all sources with status indicators.
+
+```bash
+codex-quota codex list
+codex-quota codex list --json
 ```
 
 Output shows:
@@ -102,15 +125,34 @@ Output shows:
 - Email, plan type, token expiry
 - Source file for each account
 
-### remove
+### claude list
 
-Remove an account from storage.
+List Claude credentials from `CLAUDE_ACCOUNTS` or `~/.claude-accounts.json`.
 
 ```bash
-codex-quota remove old-account
+codex-quota claude list
+codex-quota claude list --json
+```
+
+### codex remove
+
+Remove a Codex account from storage.
+
+```bash
+codex-quota codex remove old-account
 ```
 
 Note: Accounts from `CODEX_ACCOUNTS` env var cannot be removed via CLI.
+
+### claude remove
+
+Remove a Claude credential from storage.
+
+```bash
+codex-quota claude remove old-account
+```
+
+Note: Accounts from `CLAUDE_ACCOUNTS` env var cannot be removed via CLI.
 
 ## Options
 
@@ -119,7 +161,6 @@ Note: Accounts from `CODEX_ACCOUNTS` env var cannot be removed via CLI.
 | `--json` | Output in JSON format |
 | `--no-browser` | Print auth URL instead of opening browser |
 | `--no-color` | Disable colored output |
-| `--claude` | Include Claude Code usage (uses `CLAUDE_ACCOUNTS` or `~/.claude-accounts.json`) |
 | `--version, -v` | Show version number |
 | `--help, -h` | Show help |
 
@@ -136,7 +177,7 @@ reads from or writes to each path.
 | `~/.codex/auth.json` | Codex CLI single-account (label `codex-cli`) | Yes | Yes (`switch`) |
 | `~/.local/share/opencode/auth.json` | OpenCode auth file (`openai` provider) | No | Yes (`switch` if it exists) |
 
-New accounts added via `codex-quota add` are saved to `~/.codex-accounts.json`, which is
+New accounts added via `codex-quota codex add` are saved to `~/.codex-accounts.json`, which is
 shared with OpenCode.
 
 ## Multi-Account JSON Schema
@@ -171,7 +212,7 @@ File: `~/.codex-accounts.json`
 
 ## OAuth Flow
 
-The `add` command uses OAuth 2.0 with PKCE for secure browser authentication:
+The `codex add` command uses OAuth 2.0 with PKCE for secure browser authentication:
 
 1. Generates PKCE code verifier and challenge
 2. Starts local callback server on `http://127.0.0.1:1455`
@@ -186,7 +227,7 @@ The `add` command uses OAuth 2.0 with PKCE for secure browser authentication:
 In SSH sessions or headless environments (detected via `SSH_CLIENT`, `SSH_TTY`, or missing `DISPLAY`), the auth URL is printed instead of opening a browser:
 
 ```bash
-codex-quota add --no-browser
+codex-quota codex add --no-browser
 # Prints: Open this URL in your browser: https://auth.openai.com/authorize?...
 ```
 
@@ -201,7 +242,7 @@ Error: Port 1455 is in use. Close other codex-quota instances and retry.
 ```
 
 Another process is using port 1455. Check for:
-- Other `codex-quota add` commands running
+- Other `codex-quota codex add` commands running
 - OpenCode or Codex CLI auth processes
 
 Find and kill the process:
@@ -214,7 +255,7 @@ kill <pid>
 
 If browser doesn't open in SSH session:
 
-1. Use `--no-browser` flag: `codex-quota add --no-browser`
+1. Use `--no-browser` flag: `codex-quota codex add --no-browser`
 2. Copy the printed URL to a browser on another machine
 3. Complete authentication in browser
 4. The callback is received by the server running over SSH
@@ -223,13 +264,13 @@ If browser doesn't open in SSH session:
 
 If token refresh fails:
 ```
-Error: Failed to refresh token. Re-authenticate with 'codex-quota add'.
+Error: Failed to refresh token. Re-authenticate with 'codex-quota codex add'.
 ```
 
 The refresh token may have expired. Add the account again:
 ```bash
-codex-quota remove expired-account
-codex-quota add new-label
+codex-quota codex remove expired-account
+codex-quota codex add new-label
 ```
 
 ### Environment variable accounts
@@ -246,33 +287,33 @@ Edit your shell configuration to remove the account from the env var.
 All commands support `--json` for scripting:
 
 ```bash
-# Quota
+# Quota (combined)
 codex-quota --json
-# [{"label":"personal","email":"user@example.com","usage":{...},"source":"~/.codex-accounts.json"}]
+# {"codex":[{"label":"personal","email":"user@example.com","usage":{...}}],"claude":[...]}
 
-# List
-codex-quota list --json
+# List (Codex)
+codex-quota codex list --json
 # {"accounts":[{"label":"personal","isActive":true,"email":"...","source":"..."}]}
 
-# Add (success)
-codex-quota add work --json
+# Add (Codex, success)
+codex-quota codex add work --json
 # {"success":true,"label":"work","email":"user@example.com","accountId":"...","source":"~/.codex-accounts.json"}
 
-# Switch
-codex-quota switch personal --json
+# Switch (Codex)
+codex-quota codex switch personal --json
 # {"success":true,"label":"personal","email":"...","authPath":"~/.codex/auth.json"}
 
 # Errors include structured data
-codex-quota switch nonexistent --json
+codex-quota codex switch nonexistent --json
 # {"success":false,"error":"Account not found","availableLabels":["personal","work"]}
 ```
 
 ## Claude Code Usage (Optional)
 
-Use the `--claude` flag to include Claude Code subscription usage alongside OpenAI quotas:
+Use the `claude` namespace to check Claude usage alongside OpenAI quotas:
 
 ```bash
-codex-quota --claude
+codex-quota claude quota
 ```
 
 If multiple Claude accounts are configured, each account is fetched and displayed separately.
