@@ -24,6 +24,9 @@ After installation, both `codex-quota` and `cq` commands are available.
 # Add a new account (opens browser for OAuth)
 codex-quota add personal
 
+# Add a Claude credential (interactive)
+codex-quota claude add work
+
 # Check quota for all accounts
 codex-quota
 
@@ -58,6 +61,16 @@ Add a new account via OAuth browser authentication.
 codex-quota add                # Label derived from email
 codex-quota add work           # With explicit label
 codex-quota add --no-browser   # Print URL (for SSH/headless)
+```
+
+### claude add
+
+Add a Claude credential interactively.
+
+```bash
+codex-quota claude add               # Prompt for label + credentials
+codex-quota claude add work          # With explicit label
+codex-quota claude add work --json   # JSON output
 ```
 
 ### switch
@@ -106,7 +119,7 @@ Note: Accounts from `CODEX_ACCOUNTS` env var cannot be removed via CLI.
 | `--json` | Output in JSON format |
 | `--no-browser` | Print auth URL instead of opening browser |
 | `--no-color` | Disable colored output |
-| `--claude` | Include Claude Code usage (uses `~/.claude/.credentials.json`) |
+| `--claude` | Include Claude Code usage (uses `CLAUDE_ACCOUNTS` or `~/.claude-accounts.json`) |
 | `--version, -v` | Show version number |
 | `--help, -h` | Show help |
 
@@ -262,6 +275,14 @@ Use the `--claude` flag to include Claude Code subscription usage alongside Open
 codex-quota --claude
 ```
 
+If multiple Claude accounts are configured, each account is fetched and displayed separately.
+
+To add a Claude credential interactively:
+
+```bash
+codex-quota claude add
+```
+
 This uses your local Claude session to call:
 - `https://claude.ai/api/organizations`
 - `https://claude.ai/api/organizations/{orgId}/usage`
@@ -269,10 +290,32 @@ This uses your local Claude session to call:
 - `https://claude.ai/api/account`
 
 Authentication sources (in order):
-1. Browser cookies (Chromium/Chrome) to read `sessionKey` and `lastActiveOrg`
-2. `~/.claude/.credentials.json` OAuth `accessToken`
+1. `CLAUDE_ACCOUNTS` env var (JSON array or `{ accounts: [...] }`)
+2. `~/.claude-accounts.json` (multi-account format)
+3. Browser cookies (Chromium/Chrome) to read `sessionKey` and `lastActiveOrg`
+4. `~/.claude/.credentials.json` OAuth `accessToken`
+
+Multi-account format (Claude):
+```json
+{
+  "accounts": [
+    {
+      "label": "personal",
+      "sessionKey": "sk-ant-oat...",
+      "cfClearance": "cf_clearance...",
+      "oauthToken": "claude-ai-access-token",
+      "orgId": "org_uuid_optional"
+    }
+  ]
+}
+```
+
+Notes:
+- Only `label` plus one of `sessionKey` or `oauthToken` is required.
+- `cfClearance`, `orgId`, and `cookies` are optional.
 
 Environment overrides:
+- `CLAUDE_ACCOUNTS` to supply multi-account JSON directly
 - `CLAUDE_CREDENTIALS_PATH` to point to a different credentials file
 - `CLAUDE_COOKIE_DB_PATH` to point to a specific Chromium/Chrome Cookies DB
 
