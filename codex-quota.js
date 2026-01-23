@@ -60,6 +60,7 @@ const CLAUDE_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (K
 
 // CLI command names
 const PRIMARY_CMD = "codex-quota";
+const PACKAGE_JSON_PATH = join(dirname(import.meta.url.replace("file://", "")), "package.json");
 
 const MULTI_ACCOUNT_PATHS = [
 	join(homedir(), ".codex-accounts.json"),
@@ -67,6 +68,7 @@ const MULTI_ACCOUNT_PATHS = [
 ];
 
 const CODEX_CLI_AUTH_PATH = join(homedir(), ".codex", "auth.json");
+const PI_AUTH_PATH = join(homedir(), ".pi", "agent", "auth.json");
 const DEFAULT_XDG_DATA_HOME = join(homedir(), ".local", "share");
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -125,6 +127,19 @@ function outputJson(data) {
 	console.log(JSON.stringify(data, null, 2));
 }
 
+/**
+ * Get the CLI version from package.json
+ * @returns {string}
+ */
+function getPackageVersion() {
+	try {
+		const pkg = JSON.parse(readFileSync(PACKAGE_JSON_PATH, "utf-8"));
+		return pkg.version || "unknown";
+	} catch {
+		return "unknown";
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // JWT decode
 // ─────────────────────────────────────────────────────────────────────────────
@@ -178,6 +193,14 @@ function getOpencodeAuthPath() {
 function getCodexCliAuthPath() {
 	const override = process.env.CODEX_AUTH_PATH;
 	return override ? override : CODEX_CLI_AUTH_PATH;
+}
+
+/**
+ * Resolve pi auth.json path.
+ * @returns {string}
+ */
+function getPiAuthPath() {
+	return PI_AUTH_PATH;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -491,6 +514,56 @@ function updateOpencodeAuth(account) {
 	} catch (err) {
 		const message = err?.message ?? String(err);
 		return { updated: false, path: authPath, error: `Failed to write OpenCode auth.json: ${message}` };
+	}
+	
+	return { updated: true, path: authPath };
+}
+
+/**
+ * Update pi auth.json with new OpenAI Codex OAuth tokens
+ * Preserves other providers and extra fields.
+ * @param {{ access: string, refresh: string, expires?: number, accountId: string }} account
+ * @returns {{ updated: boolean, path: string, error?: string, skipped?: boolean }}
+ */
+function updatePiAuth(account) {
+	const authPath = getPiAuthPath();
+	if (!existsSync(authPath)) {
+		return { updated: false, path: authPath, skipped: true };
+	}
+	
+	let existingAuth = {};
+	try {
+		const raw = readFileSync(authPath, "utf-8");
+		const parsed = JSON.parse(raw);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			return { updated: false, path: authPath, error: "Invalid pi auth.json format" };
+		}
+		existingAuth = parsed;
+	} catch (err) {
+		const message = err?.message ?? String(err);
+		return { updated: false, path: authPath, error: `Failed to read pi auth.json: ${message}` };
+	}
+	
+	const codexEntry = existingAuth["openai-codex"];
+	const codexAuth = codexEntry && typeof codexEntry === "object" ? codexEntry : {};
+	const expires = account.expires ?? Date.now() - 1000;
+	const updatedAuth = {
+		...existingAuth,
+		"openai-codex": {
+			...codexAuth,
+			type: "oauth",
+			access: account.access,
+			refresh: account.refresh,
+			expires: expires,
+			accountId: account.accountId,
+		},
+	};
+	
+	try {
+		writeFileAtomic(authPath, JSON.stringify(updatedAuth, null, 2) + "\n", { mode: 0o600 });
+	} catch (err) {
+		const message = err?.message ?? String(err);
+		return { updated: false, path: authPath, error: `Failed to write pi auth.json: ${message}` };
 	}
 	
 	return { updated: true, path: authPath };
@@ -1556,6 +1629,7 @@ function buildClaudeUsageLines(payload) {
 
 function printHelp() {
 	console.log(`${PRIMARY_CMD} - Manage and monitor OpenAI Codex accounts
+Version: ${getPackageVersion()}
 
 Usage:
   ${PRIMARY_CMD} [command] [options]
@@ -1563,7 +1637,7 @@ Usage:
 Commands:
   quota [label]     Check usage quota (default command)
   add [label]       Add a new account via OAuth browser flow
-  switch <label>    Switch active account for Codex CLI and OpenCode
+  switch <label>    Switch active account for Codex CLI, OpenCode, and pi
   list              List all accounts from all sources
   remove <label>    Remove an account from storage
 
@@ -1589,10 +1663,10 @@ Account sources (checked in order):
   3. ~/.opencode/openai-codex-auth-accounts.json
   4. ~/.codex/auth.json (Codex CLI format)
 
-OpenCode Integration:
-  The 'switch' command updates both Codex CLI (~/.codex/auth.json) and
-  OpenCode (~/.local/share/opencode/auth.json) authentication files,
-  allowing seamless account switching across both tools.
+OpenCode & pi Integration:
+  The 'switch' command updates Codex CLI (~/.codex/auth.json) plus
+  OpenCode (~/.local/share/opencode/auth.json) and pi (~/.pi/agent/auth.json)
+  authentication files when they exist, enabling seamless account switching.
 
 Run '${PRIMARY_CMD} <command> --help' for help on a specific command.
 `);
@@ -1647,14 +1721,15 @@ Options:
   --help, -h        Show this help
 
 Description:
-  Switches the active OpenAI account for both Codex CLI and OpenCode.
+  Switches the active OpenAI account for Codex CLI, OpenCode, and pi.
   
-  This command updates two authentication files:
+  This command updates authentication files when they exist:
     1. ~/.codex/auth.json - Used by Codex CLI
     2. ~/.local/share/opencode/auth.json - Used by OpenCode (if exists)
+    3. ~/.pi/agent/auth.json - Used by pi (if exists)
   
   The OpenCode auth file location respects XDG_DATA_HOME if set.
-  If the OpenCode auth file doesn't exist, only the Codex CLI file is updated.
+  If the optional auth files don't exist, only the Codex CLI file is updated.
   
   If the token is expired, it will be refreshed before switching.
   Any existing OPENAI_API_KEY in auth.json is preserved.
@@ -1748,6 +1823,7 @@ Arguments:
 
 Options:
   --json            Output in JSON format
+  --claude          Include Claude Code usage (uses ~/.claude/.credentials.json)
   --help, -h        Show this help
 
 Description:
@@ -2398,7 +2474,7 @@ async function handleAdd(args, flags) {
 }
 
 /**
- * Handle switch subcommand - switch active account in ~/.codex/auth.json
+ * Handle switch subcommand - switch active account for Codex CLI/OpenCode/pi auth files
  * @param {string[]} args - Non-flag arguments (label is required)
  * @param {{ json: boolean }} flags - Parsed flags
  */
@@ -2502,10 +2578,16 @@ async function handleSwitch(args, flags) {
 			console.error(colorize(`Warning: ${opencodeUpdate.error}`, YELLOW));
 		}
 		
-		// 9. Get profile info for display
+		// 9. Update pi auth.json if present
+		const piUpdate = updatePiAuth(account);
+		if (piUpdate.error && !flags.json) {
+			console.error(colorize(`Warning: ${piUpdate.error}`, YELLOW));
+		}
+		
+		// 10. Get profile info for display
 		const profile = extractProfile(account.access);
 		
-		// 10. Print confirmation (JSON OR human-readable, not both)
+		// 11. Print confirmation (JSON OR human-readable, not both)
 		if (flags.json) {
 			const output = {
 				success: true,
@@ -2519,6 +2601,11 @@ async function handleSwitch(args, flags) {
 			} else if (opencodeUpdate.error) {
 				output.opencodeAuthError = opencodeUpdate.error;
 			}
+			if (piUpdate.updated) {
+				output.piAuthPath = piUpdate.path;
+			} else if (piUpdate.error) {
+				output.piAuthError = piUpdate.error;
+			}
 			console.log(JSON.stringify(output, null, 2));
 		} else {
 			const emailDisplay = profile.email ? ` <${profile.email}>` : "";
@@ -2530,6 +2617,9 @@ async function handleSwitch(args, flags) {
 			];
 			if (opencodeUpdate.updated) {
 				lines.push(`OpenCode:  ${shortenPath(opencodeUpdate.path)}`);
+			}
+			if (piUpdate.updated) {
+				lines.push(`pi:        ${shortenPath(piUpdate.path)}`);
 			}
 			const boxLines = drawBox(lines);
 			console.log(boxLines.join("\n"));
@@ -3151,14 +3241,7 @@ async function main() {
 	
 	// Handle --version flag
 	if (args.includes("--version") || args.includes("-v")) {
-		// Read version from package.json (relative to this script)
-		const packagePath = join(dirname(import.meta.url.replace("file://", "")), "package.json");
-		try {
-			const pkg = JSON.parse(readFileSync(packagePath, "utf-8"));
-			console.log(pkg.version || "unknown");
-		} catch {
-			console.log("unknown");
-		}
+		console.log(getPackageVersion());
 		return;
 	}
 	
