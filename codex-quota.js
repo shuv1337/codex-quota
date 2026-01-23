@@ -5,9 +5,9 @@
  * Zero dependencies - uses Node.js built-ins only
  * 
  * Usage:
- *   node codex-quota.js              # Check all accounts
- *   node codex-quota.js --json       # JSON output
- *   node codex-quota.js <label>      # Check specific account
+ *   node codex-quota.js                    # Check all accounts
+ *   node codex-quota.js codex quota        # Check Codex usage
+ *   node codex-quota.js claude quota       # Check Claude usage
  * 
  * Account sources (checked in order):
  *   1. CODEX_ACCOUNTS env var (JSON array)
@@ -416,6 +416,25 @@ function getAllLabels() {
 	return [...new Set(accounts.map(a => a.label))];
 }
 
+/**
+ * Find a Claude account by label from supported sources
+ * @param {string} label - Claude account label to find
+ * @returns {{label: string, sessionKey?: string, oauthToken?: string, oauthRefreshToken?: string, oauthExpiresAt?: number, oauthScopes?: string[], source: string} | null}
+ */
+function findClaudeAccountByLabel(label) {
+	const accounts = loadClaudeAccounts();
+	return accounts.find(account => account.label === label) ?? null;
+}
+
+/**
+ * Get all Claude labels from supported sources
+ * @returns {string[]} Array of Claude labels
+ */
+function getClaudeLabels() {
+	const accounts = loadClaudeAccounts();
+	return [...new Set(accounts.map(account => account.label))];
+}
+
 function loadAccounts() {
 	// 1. Check env var
 	const envAccounts = process.env.CODEX_ACCOUNTS;
@@ -606,6 +625,149 @@ function updatePiAuth(account) {
 		return { updated: false, path: authPath, error: `Failed to write pi auth.json: ${message}` };
 	}
 	
+	return { updated: true, path: authPath };
+}
+
+/**
+ * Update Claude Code credentials with new OAuth tokens
+ * @param {{ oauthToken: string, oauthRefreshToken?: string | null, oauthExpiresAt?: number | null, oauthScopes?: string[] | null }} account
+ * @returns {{ updated: boolean, path: string, error?: string }}
+ */
+function updateClaudeCredentials(account) {
+	const credentialsPath = process.env.CLAUDE_CREDENTIALS_PATH || CLAUDE_CREDENTIALS_PATH;
+	let existing = {};
+	if (existsSync(credentialsPath)) {
+		try {
+			const raw = readFileSync(credentialsPath, "utf-8");
+			const parsed = JSON.parse(raw);
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+				return { updated: false, path: credentialsPath, error: "Invalid Claude credentials format" };
+			}
+			existing = parsed;
+		} catch (err) {
+			const message = err?.message ?? String(err);
+			return { updated: false, path: credentialsPath, error: `Failed to read Claude credentials: ${message}` };
+		}
+	}
+
+	const updatedOauth = {
+		accessToken: account.oauthToken,
+		refreshToken: account.oauthRefreshToken ?? null,
+		expiresAt: account.oauthExpiresAt ?? null,
+		scopes: account.oauthScopes ?? null,
+	};
+
+	const updatedCredentials = {
+		...existing,
+		claudeAiOauth: updatedOauth,
+	};
+	if ("claude_ai_oauth" in updatedCredentials) {
+		delete updatedCredentials.claude_ai_oauth;
+	}
+
+	try {
+		writeFileAtomic(credentialsPath, JSON.stringify(updatedCredentials, null, 2) + "\n", { mode: 0o600 });
+	} catch (err) {
+		const message = err?.message ?? String(err);
+		return { updated: false, path: credentialsPath, error: `Failed to write Claude credentials: ${message}` };
+	}
+
+	return { updated: true, path: credentialsPath };
+}
+
+/**
+ * Update OpenCode auth.json with new Claude OAuth tokens
+ * @param {{ oauthToken: string, oauthRefreshToken?: string | null, oauthExpiresAt?: number | null, oauthScopes?: string[] | null }} account
+ * @returns {{ updated: boolean, path: string, error?: string, skipped?: boolean }}
+ */
+function updateOpencodeClaudeAuth(account) {
+	const authPath = getOpencodeAuthPath();
+	if (!existsSync(authPath)) {
+		return { updated: false, path: authPath, skipped: true };
+	}
+
+	let existingAuth = {};
+	try {
+		const raw = readFileSync(authPath, "utf-8");
+		const parsed = JSON.parse(raw);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			return { updated: false, path: authPath, error: "Invalid OpenCode auth.json format" };
+		}
+		existingAuth = parsed;
+	} catch (err) {
+		const message = err?.message ?? String(err);
+		return { updated: false, path: authPath, error: `Failed to read OpenCode auth.json: ${message}` };
+	}
+
+	const anthropicEntry = existingAuth.anthropic;
+	const anthropicAuth = anthropicEntry && typeof anthropicEntry === "object" ? anthropicEntry : {};
+	const updatedAuth = {
+		...existingAuth,
+		anthropic: {
+			...anthropicAuth,
+			type: "oauth",
+			access: account.oauthToken,
+			refresh: account.oauthRefreshToken ?? null,
+			expires: account.oauthExpiresAt ?? null,
+			scopes: account.oauthScopes ?? null,
+		},
+	};
+
+	try {
+		writeFileAtomic(authPath, JSON.stringify(updatedAuth, null, 2) + "\n", { mode: 0o600 });
+	} catch (err) {
+		const message = err?.message ?? String(err);
+		return { updated: false, path: authPath, error: `Failed to write OpenCode auth.json: ${message}` };
+	}
+
+	return { updated: true, path: authPath };
+}
+
+/**
+ * Update pi auth.json with new Claude OAuth tokens
+ * @param {{ oauthToken: string, oauthRefreshToken?: string | null, oauthExpiresAt?: number | null, oauthScopes?: string[] | null }} account
+ * @returns {{ updated: boolean, path: string, error?: string, skipped?: boolean }}
+ */
+function updatePiClaudeAuth(account) {
+	const authPath = getPiAuthPath();
+	if (!existsSync(authPath)) {
+		return { updated: false, path: authPath, skipped: true };
+	}
+
+	let existingAuth = {};
+	try {
+		const raw = readFileSync(authPath, "utf-8");
+		const parsed = JSON.parse(raw);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			return { updated: false, path: authPath, error: "Invalid pi auth.json format" };
+		}
+		existingAuth = parsed;
+	} catch (err) {
+		const message = err?.message ?? String(err);
+		return { updated: false, path: authPath, error: `Failed to read pi auth.json: ${message}` };
+	}
+
+	const anthropicEntry = existingAuth.anthropic;
+	const anthropicAuth = anthropicEntry && typeof anthropicEntry === "object" ? anthropicEntry : {};
+	const updatedAuth = {
+		...existingAuth,
+		anthropic: {
+			...anthropicAuth,
+			type: "oauth",
+			access: account.oauthToken,
+			refresh: account.oauthRefreshToken ?? null,
+			expires: account.oauthExpiresAt ?? null,
+			scopes: account.oauthScopes ?? null,
+		},
+	};
+
+	try {
+		writeFileAtomic(authPath, JSON.stringify(updatedAuth, null, 2) + "\n", { mode: 0o600 });
+	} catch (err) {
+		const message = err?.message ?? String(err);
+		return { updated: false, path: authPath, error: `Failed to write pi auth.json: ${message}` };
+	}
+
 	return { updated: true, path: authPath };
 }
 
@@ -2193,35 +2355,30 @@ function printHelp() {
 Version: ${getPackageVersion()}
 
 Usage:
-  ${PRIMARY_CMD} [command] [options]
+  ${PRIMARY_CMD} <namespace> [command] [options]
+  ${PRIMARY_CMD} [label]                       Check quota for all accounts (Codex + Claude)
 
-Commands:
-  quota [label]     Check usage quota (default command)
-  add [label]       Add a new account via OAuth browser flow
-  claude add [label] Add a Claude credential for quota tracking
-  switch <label>    Switch active account for Codex CLI, OpenCode, and pi
-  list              List all accounts from all sources
-  remove <label>    Remove an account from storage
+Namespaces:
+  codex             Manage OpenAI Codex accounts
+  claude            Manage Claude accounts
 
 Options:
   --json            Output in JSON format
   --no-browser      Print auth URL instead of opening browser
   --no-color        Disable colored output
-  --codex           Show only Codex accounts (default: show both)
-  --claude          Show only Claude accounts (default: show both)
   --version, -v     Show version number
   --help, -h        Show this help
 
 Examples:
   ${PRIMARY_CMD}                   Check quota for all accounts (Codex + Claude)
-  ${PRIMARY_CMD} --codex           Check quota for Codex accounts only
-  ${PRIMARY_CMD} --claude          Check quota for Claude accounts only
-  ${PRIMARY_CMD} personal          Check quota for "personal" account
-  ${PRIMARY_CMD} add work          Add new account with label "work"
-  ${PRIMARY_CMD} claude add work   Add a Claude credential with label "work"
-  ${PRIMARY_CMD} switch personal   Switch to "personal" account
-  ${PRIMARY_CMD} list              List all configured accounts
-  ${PRIMARY_CMD} remove old        Remove "old" account
+  ${PRIMARY_CMD} codex             Show Codex command help
+  ${PRIMARY_CMD} claude            Show Claude command help
+  ${PRIMARY_CMD} codex quota       Check quota for Codex accounts
+  ${PRIMARY_CMD} claude quota      Check quota for Claude accounts
+  ${PRIMARY_CMD} codex add work    Add Codex account with label "work"
+  ${PRIMARY_CMD} claude add work   Add Claude credential with label "work"
+  ${PRIMARY_CMD} codex switch work Switch Codex/OpenCode/pi to "work"
+  ${PRIMARY_CMD} claude switch work Switch Claude Code/OpenCode/pi to "work"
 
 Account sources (checked in order):
   1. CODEX_ACCOUNTS env var (JSON array)
@@ -2234,7 +2391,36 @@ OpenCode & pi Integration:
   OpenCode (~/.local/share/opencode/auth.json) and pi (~/.pi/agent/auth.json)
   authentication files when they exist, enabling seamless account switching.
 
-Run '${PRIMARY_CMD} <command> --help' for help on a specific command.
+Run '${PRIMARY_CMD} <namespace> <command> --help' for help on a specific command.
+`);
+}
+
+function printHelpCodex() {
+	console.log(`${PRIMARY_CMD} codex - Manage OpenAI Codex accounts
+
+Usage:
+  ${PRIMARY_CMD} codex [command] [options]
+
+Commands:
+  quota [label]     Check usage quota (default command)
+  add [label]       Add a new account via OAuth browser flow
+  switch <label>    Switch active account for Codex CLI, OpenCode, and pi
+  list              List all accounts from all sources
+  remove <label>    Remove an account from storage
+
+Options:
+  --json            Output in JSON format
+  --no-browser      Print auth URL instead of opening browser
+  --no-color        Disable colored output
+  --help, -h        Show this help
+
+Examples:
+  ${PRIMARY_CMD} codex                   Check quota for Codex accounts
+  ${PRIMARY_CMD} codex personal          Check quota for "personal" account
+  ${PRIMARY_CMD} codex add work          Add new account with label "work"
+  ${PRIMARY_CMD} codex switch personal   Switch to "personal" account
+  ${PRIMARY_CMD} codex list              List all configured accounts
+  ${PRIMARY_CMD} codex remove old        Remove "old" account
 `);
 }
 
@@ -2242,23 +2428,30 @@ function printHelpClaude() {
 	console.log(`${PRIMARY_CMD} claude - Manage Claude credentials
 
 Usage:
-  ${PRIMARY_CMD} claude add [label] [options]
+  ${PRIMARY_CMD} claude [command] [options]
 
 Commands:
+  quota [label]     Check Claude usage (default command)
   add [label]       Add a Claude credential (via OAuth or manual entry)
+  switch <label>    Switch Claude Code, OpenCode, and pi credentials
+  list              List Claude credentials
+  remove <label>    Remove a Claude credential from storage
 
 Options:
+  --json            Output result in JSON format
   --oauth           Use OAuth browser authentication (recommended)
   --manual          Use manual token entry
   --no-browser      Print OAuth URL instead of opening browser
-  --json            Output result in JSON format
   --help, -h        Show this help
 
 Examples:
-  ${PRIMARY_CMD} claude add                     Add Claude credential (prompts for method)
-  ${PRIMARY_CMD} claude add work --oauth        Add via OAuth browser flow
-  ${PRIMARY_CMD} claude add work --manual       Add via manual token entry
-  ${PRIMARY_CMD} claude add work --json         JSON output for scripting
+  ${PRIMARY_CMD} claude                   Check Claude usage
+  ${PRIMARY_CMD} claude quota work        Check Claude usage for "work"
+  ${PRIMARY_CMD} claude add               Add Claude credential (prompts for method)
+  ${PRIMARY_CMD} claude add work --oauth  Add via OAuth browser flow
+  ${PRIMARY_CMD} claude switch work       Switch Claude Code/OpenCode/pi to "work"
+  ${PRIMARY_CMD} claude list              List Claude credentials
+  ${PRIMARY_CMD} claude remove old        Remove Claude credential "old"
 `);
 }
 
@@ -2296,16 +2489,108 @@ Examples:
   ${PRIMARY_CMD} claude add                       Interactive (prompts for method)
   ${PRIMARY_CMD} claude add work --oauth          OAuth browser flow
   ${PRIMARY_CMD} claude add work --manual         Manual token entry
-  ${PRIMARY_CMD} claude add work --oauth --no-browser  OAuth without opening browser
-  ${PRIMARY_CMD} claude add work --json           JSON output for scripting
+	  ${PRIMARY_CMD} claude add work --oauth --no-browser  OAuth without opening browser
+	  ${PRIMARY_CMD} claude add work --json           JSON output for scripting
+`);
+}
+
+function printHelpClaudeSwitch() {
+	console.log(`${PRIMARY_CMD} claude switch - Switch Claude credentials
+
+Usage:
+  ${PRIMARY_CMD} claude switch <label> [options]
+
+Arguments:
+  label             Required. Label of the Claude credential to switch to
+
+Options:
+  --json            Output result in JSON format
+  --help, -h        Show this help
+
+Description:
+  Updates Claude Code (~/.claude/.credentials.json) and, when available,
+  OpenCode (~/.local/share/opencode/auth.json) plus pi (~/.pi/agent/auth.json).
+
+  Requires an OAuth-based Claude credential (add with --oauth).
+
+Examples:
+  ${PRIMARY_CMD} claude switch work
+  ${PRIMARY_CMD} claude switch work --json
+`);
+}
+
+function printHelpClaudeList() {
+	console.log(`${PRIMARY_CMD} claude list - List Claude credentials
+
+Usage:
+  ${PRIMARY_CMD} claude list [options]
+
+Options:
+  --json            Output in JSON format
+  --help, -h        Show this help
+
+Description:
+  Lists Claude credentials stored in CLAUDE_ACCOUNTS or ~/.claude-accounts.json.
+
+Examples:
+  ${PRIMARY_CMD} claude list
+  ${PRIMARY_CMD} claude list --json
+`);
+}
+
+function printHelpClaudeRemove() {
+	console.log(`${PRIMARY_CMD} claude remove - Remove a Claude credential
+
+Usage:
+  ${PRIMARY_CMD} claude remove <label> [options]
+
+Arguments:
+  label             Required. Label of the Claude credential to remove
+
+Options:
+  --json            Output result in JSON format (skips confirmation)
+  --help, -h        Show this help
+
+Description:
+  Removes a Claude credential from ~/.claude-accounts.json.
+  Credentials stored in CLAUDE_ACCOUNTS env var cannot be removed via CLI.
+
+Examples:
+  ${PRIMARY_CMD} claude remove old
+  ${PRIMARY_CMD} claude remove work --json
+`);
+}
+
+function printHelpClaudeQuota() {
+	console.log(`${PRIMARY_CMD} claude quota - Check Claude usage quota
+
+Usage:
+  ${PRIMARY_CMD} claude quota [label] [options]
+
+Arguments:
+  label             Optional. Check quota for a specific Claude credential
+
+Options:
+  --json            Output in JSON format
+  --help, -h        Show this help
+
+Description:
+  Displays usage statistics for Claude accounts. Tokens are refreshed when
+  available. Uses OAuth credentials when possible and falls back to legacy
+  session credentials.
+
+Examples:
+  ${PRIMARY_CMD} claude quota
+  ${PRIMARY_CMD} claude quota work
+  ${PRIMARY_CMD} claude quota --json
 `);
 }
 
 function printHelpAdd() {
-	console.log(`${PRIMARY_CMD} add - Add a new account via OAuth browser flow
+	console.log(`${PRIMARY_CMD} codex add - Add a new account via OAuth browser flow
 
 Usage:
-  ${PRIMARY_CMD} add [label] [options]
+	  ${PRIMARY_CMD} codex add [label] [options]
 
 Arguments:
   label             Optional label for the account (e.g., "work", "personal")
@@ -2325,9 +2610,9 @@ Description:
   port 1455 to receive the authentication callback.
 
 Examples:
-  ${PRIMARY_CMD} add                     Add account (label from email)
-  ${PRIMARY_CMD} add work                Add account with label "work"
-  ${PRIMARY_CMD} add --no-browser        Print URL for manual browser auth
+	  ${PRIMARY_CMD} codex add                     Add account (label from email)
+	  ${PRIMARY_CMD} codex add work                Add account with label "work"
+	  ${PRIMARY_CMD} codex add --no-browser        Print URL for manual browser auth
 
 Environment:
   SSH/headless environments are auto-detected. The URL will be printed
@@ -2337,10 +2622,10 @@ Environment:
 }
 
 function printHelpSwitch() {
-	console.log(`${PRIMARY_CMD} switch - Switch the active account
+	console.log(`${PRIMARY_CMD} codex switch - Switch the active account
 
 Usage:
-  ${PRIMARY_CMD} switch <label> [options]
+  ${PRIMARY_CMD} codex switch <label> [options]
 
 Arguments:
   label             Required. Label of the account to switch to
@@ -2364,24 +2649,23 @@ Description:
   Any existing OPENAI_API_KEY in auth.json is preserved.
 
 Examples:
-  ${PRIMARY_CMD} switch personal         Switch to "personal" account
-  ${PRIMARY_CMD} switch work --json      Switch to "work" with JSON output
+  ${PRIMARY_CMD} codex switch personal         Switch to "personal" account
+  ${PRIMARY_CMD} codex switch work --json      Switch to "work" with JSON output
 
 See also:
-  ${PRIMARY_CMD} list    Show all available accounts and their labels
+  ${PRIMARY_CMD} codex list    Show all available accounts and their labels
 `);
 }
 
 function printHelpList() {
-	console.log(`${PRIMARY_CMD} list - List all configured accounts
+	console.log(`${PRIMARY_CMD} codex list - List all configured accounts
 
 Usage:
-  ${PRIMARY_CMD} list [options]
+  ${PRIMARY_CMD} codex list [options]
 
 Options:
-  --json            Output in JSON format
-  --claude          Include Claude accounts in listing
-  --help, -h        Show this help
+	  --json            Output in JSON format
+	  --help, -h        Show this help
 
 Description:
   Lists all accounts from all configured sources with details:
@@ -2390,8 +2674,6 @@ Description:
   - Token expiry status
   - Source file location
   - Active indicator (* for the current account in ~/.codex/auth.json)
-  With --claude, also lists configured Claude accounts.
-
   Accounts are deduplicated by ID to avoid showing duplicates
   when the same account is stored in multiple files.
 
@@ -2404,17 +2686,16 @@ Output columns:
   Source            File path where account is stored
 
 Examples:
-  ${PRIMARY_CMD} list                    Show all accounts
-  ${PRIMARY_CMD} list --json             Get JSON output for scripting
-  ${PRIMARY_CMD} list --claude           Include Claude accounts
+  ${PRIMARY_CMD} codex list                    Show all accounts
+  ${PRIMARY_CMD} codex list --json             Get JSON output for scripting
 `);
 }
 
 function printHelpRemove() {
-	console.log(`${PRIMARY_CMD} remove - Remove an account from storage
+	console.log(`${PRIMARY_CMD} codex remove - Remove an account from storage
 
 Usage:
-  ${PRIMARY_CMD} remove <label> [options]
+  ${PRIMARY_CMD} codex remove <label> [options]
 
 Arguments:
   label             Required. Label of the account to remove
@@ -2436,30 +2717,27 @@ Safety:
   - Warns when removing the codex-cli account (clears authentication)
 
 Examples:
-  ${PRIMARY_CMD} remove old              Remove "old" account with confirmation
-  ${PRIMARY_CMD} remove work --json      Remove "work" account (no prompt)
+  ${PRIMARY_CMD} codex remove old              Remove "old" account with confirmation
+  ${PRIMARY_CMD} codex remove work --json      Remove "work" account (no prompt)
 
 See also:
-  ${PRIMARY_CMD} list    Show all accounts and their sources
+  ${PRIMARY_CMD} codex list    Show all accounts and their sources
 `);
 }
 
 function printHelpQuota() {
-	console.log(`${PRIMARY_CMD} quota - Check usage quota for accounts
+	console.log(`${PRIMARY_CMD} codex quota - Check usage quota for accounts
 
 Usage:
-  ${PRIMARY_CMD} quota [label] [options]
-  ${PRIMARY_CMD} [label] [options]          (quota is the default command)
+	  ${PRIMARY_CMD} codex quota [label] [options]
 
 Arguments:
   label             Optional. Check quota for a specific account only
                     If not provided, shows quota for all accounts
 
 Options:
-  --json            Output in JSON format
-  --codex           Show only Codex accounts (default: show both)
-  --claude          Show only Claude accounts (default: show both)
-  --help, -h        Show this help
+	  --json            Output in JSON format
+	  --help, -h        Show this help
 
 Description:
   Displays usage statistics for OpenAI Codex and Claude accounts:
@@ -2467,8 +2745,7 @@ Description:
   - Weekly usage (queries per 7-day period)
   - Available credits
 
-  By default, shows both Codex and Claude accounts.
-  Use --codex or --claude to filter to a specific type.
+  This command shows Codex usage only. Use '${PRIMARY_CMD} claude quota' for Claude.
 
   Accounts are deduplicated by ID to avoid showing the same account
   multiple times when sourced from different files.
@@ -2476,12 +2753,11 @@ Description:
   Tokens are automatically refreshed if expired.
 
 Examples:
-  ${PRIMARY_CMD}                         Check all accounts (Codex + Claude)
-  ${PRIMARY_CMD} --codex                 Check Codex accounts only
-  ${PRIMARY_CMD} --claude                Check Claude accounts only
-  ${PRIMARY_CMD} personal                Check "personal" account only
-  ${PRIMARY_CMD} quota --json            JSON output for all accounts
-  ${PRIMARY_CMD} quota work --json       JSON output for "work" account
+	  ${PRIMARY_CMD} codex quota                 Check all Codex accounts
+	  ${PRIMARY_CMD} codex quota personal        Check "personal" account only
+	  ${PRIMARY_CMD} codex quota --json          JSON output for all Codex accounts
+	  ${PRIMARY_CMD} codex quota work --json     JSON output for "work" account
+	  ${PRIMARY_CMD} claude quota                Check Claude accounts
 `);
 }
 
@@ -2938,7 +3214,7 @@ function startCallbackServer(expectedState) {
 		// Set timeout for authentication (default 2 minutes)
 		timeoutId = setTimeout(() => {
 			cleanup();
-			reject(new Error(`Authentication timed out after 2 minutes. Run '${PRIMARY_CMD} add' to try again.`));
+			reject(new Error(`Authentication timed out after 2 minutes. Run '${PRIMARY_CMD} codex add' to try again.`));
 		}, OAUTH_TIMEOUT_MS);
 		
 		// Handle Ctrl+C gracefully
@@ -3282,13 +3558,13 @@ async function handleAdd(args, flags) {
 			}, null, 2));
 		} else {
 			const emailDisplay = tokens.email ? ` <${tokens.email}>` : "";
-			const lines = [
-				colorize(`Added account ${label}${emailDisplay}`, GREEN),
-				"",
-				`Saved to: ${shortenPath(targetPath)}`,
-				"",
-				`Run 'cq switch ${label}' to activate this account`,
-			];
+		const lines = [
+			colorize(`Added account ${label}${emailDisplay}`, GREEN),
+			"",
+			`Saved to: ${shortenPath(targetPath)}`,
+			"",
+			`Run 'cq codex switch ${label}' to activate this account`,
+		];
 			const boxLines = drawBox(lines);
 			console.log(boxLines.join("\n"));
 		}
@@ -3331,7 +3607,7 @@ async function handleSwitch(args, flags) {
 		if (flags.json) {
 			console.log(JSON.stringify({ success: false, error: "Missing required label argument" }, null, 2));
 		} else {
-			console.error(colorize(`Usage: ${PRIMARY_CMD} switch <label>`, RED));
+			console.error(colorize(`Usage: ${PRIMARY_CMD} codex switch <label>`, RED));
 			console.error("Switches the active account in ~/.codex/auth.json");
 		}
 		process.exit(1);
@@ -3350,7 +3626,7 @@ async function handleSwitch(args, flags) {
 				}, null, 2));
 			} else if (allLabels.length === 0) {
 				console.error(colorize(`Account "${label}" not found. No accounts configured.`, RED));
-				console.error(`Run '${PRIMARY_CMD} add' to add an account via OAuth.`);
+				console.error(`Run '${PRIMARY_CMD} codex add' to add an account via OAuth.`);
 			} else {
 				console.error(colorize(`Account "${label}" not found.`, RED));
 				console.error(`Available: ${allLabels.join(", ")}`);
@@ -3369,7 +3645,7 @@ async function handleSwitch(args, flags) {
 				}, null, 2));
 			} else {
 				console.error(colorize(`Error: Failed to refresh token for "${label}". Re-authentication may be required.`, RED));
-				console.error(`Run '${PRIMARY_CMD} add' to re-authenticate this account.`);
+				console.error(`Run '${PRIMARY_CMD} codex add' to re-authenticate this account.`);
 			}
 			process.exit(1);
 		}
@@ -3593,10 +3869,9 @@ function shortenPath(filePath) {
  */
 async function handleList(flags) {
 	const accounts = loadAllAccounts();
-	const claudeAccounts = flags.claude ? loadClaudeAccounts() : [];
 	
 	// Handle zero accounts case
-	if (!accounts.length && !flags.claude) {
+	if (!accounts.length) {
 		if (flags.json) {
 			console.log(JSON.stringify({ accounts: [] }, null, 2));
 			return;
@@ -3608,7 +3883,7 @@ async function handleList(flags) {
 			console.log(`  - ${p}`);
 		}
 		console.log(`  - ${getCodexCliAuthPath()}`);
-		console.log(`\nRun '${PRIMARY_CMD} add' to add an account via OAuth.`);
+	console.log(`\nRun '${PRIMARY_CMD} codex add' to add an account via OAuth.`);
 		return;
 	}
 	
@@ -3663,15 +3938,6 @@ async function handleList(flags) {
 				divergence: divergenceDetected,
 			},
 		};
-		if (flags.claude) {
-			output.claudeAccounts = claudeAccounts.map(account => ({
-				label: account.label,
-				source: account.source,
-				hasSessionKey: Boolean(account.sessionKey ?? findClaudeSessionKey(account.cookies)),
-				hasOauthToken: Boolean(account.oauthToken),
-				orgId: account.orgId ?? null,
-			}));
-		}
 		console.log(JSON.stringify(output, null, 2));
 		return;
 	}
@@ -3724,10 +3990,10 @@ async function handleList(flags) {
 	if (hasActive || hasNativeActive) {
 		lines.push("");
 		if (hasActive) {
-			lines.push("* = active (set by cq switch)");
+			lines.push("* = active (set by cq codex switch)");
 		}
 		if (hasNativeActive) {
-			lines.push("~ = native login (run 'cq switch' to manage)");
+			lines.push("~ = native login (run 'cq codex switch' to manage)");
 		}
 	}
 
@@ -3736,39 +4002,65 @@ async function handleList(flags) {
 		console.log(boxLines.join("\n"));
 	}
 
-	if (flags.claude) {
-		const claudeLines = [];
-		claudeLines.push(`Claude Accounts (${claudeAccounts.length} total)`);
-		claudeLines.push("");
-		if (!claudeAccounts.length) {
-			claudeLines.push("No Claude accounts found.");
-			claudeLines.push("");
-			claudeLines.push("Searched:");
-			claudeLines.push("  - CLAUDE_ACCOUNTS env var");
-			for (const p of CLAUDE_MULTI_ACCOUNT_PATHS) {
-				claudeLines.push(`  - ${p}`);
-			}
-		} else {
-			for (let i = 0; i < claudeAccounts.length; i++) {
-				const account = claudeAccounts[i];
-				const authParts = [];
-				if (account.sessionKey ?? findClaudeSessionKey(account.cookies)) {
-					authParts.push("sessionKey");
-				}
-				if (account.oauthToken) {
-					authParts.push("oauthToken");
-				}
-				const authDisplay = authParts.length ? authParts.join("+") : "unknown";
-				claudeLines.push(`${account.label}`);
-				claudeLines.push(`  Auth: ${authDisplay} | ${shortenPath(account.source)}`);
-				if (i < claudeAccounts.length - 1) {
-					claudeLines.push("");
-				}
-			}
+}
+
+/**
+ * Handle Claude list subcommand - list Claude credentials
+ * @param {{ json: boolean }} flags - Parsed flags
+ */
+async function handleClaudeList(flags) {
+	const claudeAccounts = loadClaudeAccounts();
+
+	if (!claudeAccounts.length) {
+		if (flags.json) {
+			console.log(JSON.stringify({ accounts: [] }, null, 2));
+			return;
 		}
-		const claudeBox = drawBox(claudeLines);
-		console.log(claudeBox.join("\n"));
+		console.log("No Claude accounts found.");
+		console.log("\nSearched:");
+		console.log("  - CLAUDE_ACCOUNTS env var");
+		for (const p of CLAUDE_MULTI_ACCOUNT_PATHS) {
+			console.log(`  - ${p}`);
+		}
+		console.log(`\nRun '${PRIMARY_CMD} claude add' to add a Claude credential.`);
+		return;
 	}
+
+	if (flags.json) {
+		const output = {
+			accounts: claudeAccounts.map(account => ({
+				label: account.label,
+				source: account.source,
+				hasSessionKey: Boolean(account.sessionKey ?? findClaudeSessionKey(account.cookies)),
+				hasOauthToken: Boolean(account.oauthToken),
+				orgId: account.orgId ?? null,
+			})),
+		};
+		console.log(JSON.stringify(output, null, 2));
+		return;
+	}
+
+	const claudeLines = [];
+	claudeLines.push(`Claude Accounts (${claudeAccounts.length} total)`);
+	claudeLines.push("");
+	for (let i = 0; i < claudeAccounts.length; i++) {
+		const account = claudeAccounts[i];
+		const authParts = [];
+		if (account.sessionKey ?? findClaudeSessionKey(account.cookies)) {
+			authParts.push("sessionKey");
+		}
+		if (account.oauthToken) {
+			authParts.push("oauthToken");
+		}
+		const authDisplay = authParts.length ? authParts.join("+") : "unknown";
+		claudeLines.push(`${account.label}`);
+		claudeLines.push(`  Auth: ${authDisplay} | ${shortenPath(account.source)}`);
+		if (i < claudeAccounts.length - 1) {
+			claudeLines.push("");
+		}
+	}
+	const claudeBox = drawBox(claudeLines);
+	console.log(claudeBox.join("\n"));
 }
 
 /**
@@ -3820,7 +4112,7 @@ async function handleRemove(args, flags) {
 		if (flags.json) {
 			console.log(JSON.stringify({ success: false, error: "Missing required label argument" }, null, 2));
 		} else {
-			console.error(colorize(`Usage: ${PRIMARY_CMD} remove <label>`, RED));
+			console.error(colorize(`Usage: ${PRIMARY_CMD} codex remove <label>`, RED));
 			console.error("Removes an account from the multi-account file.");
 		}
 		process.exit(1);
@@ -3868,7 +4160,7 @@ async function handleRemove(args, flags) {
 	if (source === codexAuthPath) {
 		if (!flags.json) {
 			console.log(colorize("Warning: This will clear your Codex CLI authentication.", YELLOW));
-			console.log(`You will need to re-authenticate using 'codex auth' or '${PRIMARY_CMD} add'.`);
+			console.log(`You will need to re-authenticate using 'codex auth' or '${PRIMARY_CMD} codex add'.`);
 			const confirmed = await promptConfirm("Continue?");
 			if (!confirmed) {
 				console.log("Cancelled.");
@@ -4002,6 +4294,250 @@ async function handleRemove(args, flags) {
 }
 
 /**
+ * Handle Claude remove subcommand - remove a Claude account from storage
+ * @param {string[]} args - Non-flag arguments (label is required)
+ * @param {{ json: boolean }} flags - Parsed flags
+ */
+async function handleClaudeRemove(args, flags) {
+	const label = args[0];
+	if (!label) {
+		if (flags.json) {
+			console.log(JSON.stringify({ success: false, error: "Missing required label argument" }, null, 2));
+		} else {
+			console.error(colorize(`Usage: ${PRIMARY_CMD} claude remove <label>`, RED));
+			console.error("Removes a Claude credential from the multi-account file.");
+		}
+		process.exit(1);
+	}
+
+	const account = findClaudeAccountByLabel(label);
+	if (!account) {
+		const availableLabels = getClaudeLabels();
+		if (flags.json) {
+			console.log(JSON.stringify({
+				success: false,
+				error: `Claude account "${label}" not found`,
+				availableLabels,
+			}, null, 2));
+		} else {
+			console.error(colorize(`Claude account "${label}" not found.`, RED));
+			if (availableLabels.length) {
+				console.error(`Available labels: ${availableLabels.join(", ")}`);
+			} else {
+				console.error("No Claude accounts configured.");
+			}
+		}
+		process.exit(1);
+	}
+
+	if (account.source === "env") {
+		if (flags.json) {
+			console.log(JSON.stringify({
+				success: false,
+				error: "Cannot remove account from CLAUDE_ACCOUNTS env var. Modify the env var directly.",
+			}, null, 2));
+		} else {
+			console.error(colorize("Cannot remove account from CLAUDE_ACCOUNTS env var.", RED));
+			console.error("Modify the env var directly to remove this account.");
+		}
+		process.exit(1);
+	}
+
+	const source = account.source;
+	if (!CLAUDE_MULTI_ACCOUNT_PATHS.includes(source)) {
+		if (flags.json) {
+			console.log(JSON.stringify({
+				success: false,
+				error: `Cannot remove Claude account from ${source}. Remove it from the owning tool instead.`,
+			}, null, 2));
+		} else {
+			console.error(colorize(`Cannot remove Claude account from ${shortenPath(source)}.`, RED));
+			console.error("Remove it from the owning tool instead.");
+		}
+		process.exit(1);
+	}
+
+	let existingAccounts = [];
+	try {
+		const raw = readFileSync(source, "utf-8");
+		const parsed = JSON.parse(raw);
+		existingAccounts = Array.isArray(parsed) ? parsed : parsed?.accounts ?? [];
+	} catch {
+		if (flags.json) {
+			console.log(JSON.stringify({ success: false, error: `Failed to read ${source}` }, null, 2));
+		} else {
+			console.error(colorize(`Error reading ${shortenPath(source)}`, RED));
+		}
+		process.exit(1);
+	}
+
+	const updatedAccounts = existingAccounts.filter(a => a.label !== label);
+	if (updatedAccounts.length === existingAccounts.length) {
+		if (flags.json) {
+			console.log(JSON.stringify({ success: false, error: `Claude account "${label}" not found in ${source}` }, null, 2));
+		} else {
+			console.error(colorize(`Claude account "${label}" not found in ${shortenPath(source)}`, RED));
+		}
+		process.exit(1);
+	}
+
+	if (updatedAccounts.length === 0 && !flags.json) {
+		console.log(colorize("Warning: This is the only Claude account in this file.", YELLOW));
+		console.log(`The file will be deleted: ${shortenPath(source)}`);
+		const confirmed = await promptConfirm("Continue?");
+		if (!confirmed) {
+			console.log("Cancelled.");
+			process.exit(0);
+		}
+	}
+
+	try {
+		if (updatedAccounts.length === 0) {
+			unlinkSync(source);
+			if (flags.json) {
+				console.log(JSON.stringify({
+					success: true,
+					label,
+					source: shortenPath(source),
+					message: "File deleted (no accounts remaining)",
+				}, null, 2));
+			} else {
+				const lines = [
+					colorize(`Removed Claude account ${label}`, GREEN),
+					"",
+					`Deleted: ${shortenPath(source)} (no accounts remaining)`,
+				];
+				console.log(drawBox(lines).join("\n"));
+			}
+		} else {
+			writeFileAtomic(source, JSON.stringify({ accounts: updatedAccounts }, null, 2) + "\n", { mode: 0o600 });
+			if (flags.json) {
+				console.log(JSON.stringify({
+					success: true,
+					label,
+					source: shortenPath(source),
+					remainingAccounts: updatedAccounts.length,
+				}, null, 2));
+			} else {
+				const lines = [
+					colorize(`Removed Claude account ${label}`, GREEN),
+					"",
+					`Updated: ${shortenPath(source)} (${updatedAccounts.length} account(s) remaining)`,
+				];
+				console.log(drawBox(lines).join("\n"));
+			}
+		}
+	} catch (err) {
+		if (flags.json) {
+			console.log(JSON.stringify({ success: false, error: err.message }, null, 2));
+		} else {
+			console.error(colorize(`Error writing ${shortenPath(source)}: ${err.message}`, RED));
+		}
+		process.exit(1);
+	}
+}
+
+/**
+ * Handle Claude switch subcommand - switch Claude Code/OpenCode/pi credentials
+ * @param {string[]} args - Non-flag arguments (label is required)
+ * @param {{ json: boolean }} flags - Parsed flags
+ */
+async function handleClaudeSwitch(args, flags) {
+	const label = args[0];
+	if (!label) {
+		if (flags.json) {
+			console.log(JSON.stringify({ success: false, error: "Missing required label argument" }, null, 2));
+		} else {
+			console.error(colorize(`Usage: ${PRIMARY_CMD} claude switch <label>`, RED));
+			console.error("Switches Claude credentials in Claude Code, OpenCode, and pi.");
+		}
+		process.exit(1);
+	}
+
+	const account = findClaudeAccountByLabel(label);
+	if (!account) {
+		const availableLabels = getClaudeLabels();
+		if (flags.json) {
+			console.log(JSON.stringify({
+				success: false,
+				error: `Claude account "${label}" not found`,
+				availableLabels,
+			}, null, 2));
+		} else {
+			console.error(colorize(`Claude account "${label}" not found.`, RED));
+			if (availableLabels.length) {
+				console.error(`Available: ${availableLabels.join(", ")}`);
+			} else {
+				console.error(`Run '${PRIMARY_CMD} claude add' to add a Claude credential.`);
+			}
+		}
+		process.exit(1);
+	}
+
+	if (!account.oauthToken) {
+		const message = "Claude switch requires an OAuth token. Re-add with --oauth or provide an oauthToken.";
+		if (flags.json) {
+			console.log(JSON.stringify({ success: false, error: message }, null, 2));
+		} else {
+			console.error(colorize(`Error: ${message}`, RED));
+		}
+		process.exit(1);
+	}
+
+	const credentialsUpdate = updateClaudeCredentials(account);
+	if (credentialsUpdate.error) {
+		if (flags.json) {
+			console.log(JSON.stringify({ success: false, error: credentialsUpdate.error }, null, 2));
+		} else {
+			console.error(colorize(`Error: ${credentialsUpdate.error}`, RED));
+		}
+		process.exit(1);
+	}
+
+	const opencodeUpdate = updateOpencodeClaudeAuth(account);
+	if (opencodeUpdate.error && !flags.json) {
+		console.error(colorize(`Warning: ${opencodeUpdate.error}`, YELLOW));
+	}
+	const piUpdate = updatePiClaudeAuth(account);
+	if (piUpdate.error && !flags.json) {
+		console.error(colorize(`Warning: ${piUpdate.error}`, YELLOW));
+	}
+
+	if (flags.json) {
+		const output = {
+			success: true,
+			label,
+			claudeCredentialsPath: credentialsUpdate.path,
+		};
+		if (opencodeUpdate.updated) {
+			output.opencodeAuthPath = opencodeUpdate.path;
+		} else if (opencodeUpdate.error) {
+			output.opencodeAuthError = opencodeUpdate.error;
+		}
+		if (piUpdate.updated) {
+			output.piAuthPath = piUpdate.path;
+		} else if (piUpdate.error) {
+			output.piAuthError = piUpdate.error;
+		}
+		console.log(JSON.stringify(output, null, 2));
+		return;
+	}
+
+	const lines = [
+		colorize(`Switched Claude credentials to ${label}`, GREEN),
+		"",
+		`Claude Code: ${shortenPath(credentialsUpdate.path)}`,
+	];
+	if (opencodeUpdate.updated) {
+		lines.push(`OpenCode: ${shortenPath(opencodeUpdate.path)}`);
+	}
+	if (piUpdate.updated) {
+		lines.push(`pi: ${shortenPath(piUpdate.path)}`);
+	}
+	console.log(drawBox(lines).join("\n"));
+}
+
+/**
  * Handle Claude add subcommand - add a Claude credential interactively
  * Supports two authentication methods:
  *   - OAuth browser flow (--oauth): Opens browser for authentication
@@ -4122,7 +4658,7 @@ async function handleClaudeAdd(args, flags) {
 			"",
 			`Saved to: ${shortenPath(targetPath)}`,
 			"",
-			`Run '${PRIMARY_CMD} --claude' to check Claude usage`,
+			`Run '${PRIMARY_CMD} claude quota' to check Claude usage`,
 		];
 		console.log(drawBox(lines).join("\n"));
 	} catch (error) {
@@ -4139,22 +4675,76 @@ async function handleClaudeAdd(args, flags) {
 }
 
 /**
+ * Handle Codex subcommand entrypoint
+ * @param {string[]} args - Codex subcommand args
+ * @param {{ json: boolean, noBrowser: boolean, noColor: boolean }} flags - Parsed flags
+ */
+async function handleCodex(args, flags) {
+	const subcommand = args[0];
+	const subArgs = args.slice(1);
+
+	if (!subcommand) {
+		printHelpCodex();
+		return;
+	}
+
+	switch (subcommand) {
+		case "quota":
+			await handleQuota(subArgs, flags, "codex");
+			break;
+		case "add":
+			await handleAdd(subArgs, flags);
+			break;
+		case "switch":
+			await handleSwitch(subArgs, flags);
+			break;
+		case "list":
+			await handleList(flags);
+			break;
+		case "remove":
+			await handleRemove(subArgs, flags);
+			break;
+		case "help":
+			printHelpCodex();
+			break;
+		default:
+			printHelpCodex();
+			process.exit(1);
+	}
+}
+
+/**
  * Handle Claude subcommand entrypoint
  * @param {string[]} args - Claude subcommand args
- * @param {{ json: boolean }} flags - Parsed flags
+ * @param {{ json: boolean, noBrowser: boolean, oauth: boolean, manual: boolean }} flags - Parsed flags
  */
 async function handleClaude(args, flags) {
 	const subcommand = args[0];
 	const subArgs = args.slice(1);
 
-	if (!subcommand || subcommand === "help") {
+	if (!subcommand) {
 		printHelpClaude();
 		return;
 	}
 
 	switch (subcommand) {
+		case "quota":
+			await handleQuota(subArgs, flags, "claude");
+			break;
 		case "add":
-			await handleClaudeAdd(subArgs.filter(a => !a.startsWith("--")), flags);
+			await handleClaudeAdd(subArgs, flags);
+			break;
+		case "list":
+			await handleClaudeList(flags);
+			break;
+		case "switch":
+			await handleClaudeSwitch(subArgs, flags);
+			break;
+		case "remove":
+			await handleClaudeRemove(subArgs, flags);
+			break;
+		case "help":
+			printHelpClaude();
 			break;
 		default:
 			printHelpClaude();
@@ -4165,21 +4755,19 @@ async function handleClaude(args, flags) {
 /**
  * Handle quota subcommand (default behavior)
  * By default, shows both Codex and Claude accounts
- * Use --codex to show only Codex accounts
- * Use --claude to show only Claude accounts
  * @param {string[]} args - Non-flag arguments (e.g., label filter)
- * @param {{ json: boolean, claude?: boolean, codex?: boolean }} flags - Parsed flags
+ * @param {{ json: boolean }} flags - Parsed flags
+ * @param {"all" | "codex" | "claude"} scope - Which accounts to show
  */
-async function handleQuota(args, flags) {
+async function handleQuota(args, flags, scope = "all") {
 	const labelFilter = args[0];
 	
 	// Determine which account types to show:
-	// - If neither --codex nor --claude specified: show both (default)
-	// - If --codex specified: show only Codex
-	// - If --claude specified: show only Claude
-	// - If both specified: show both (explicit)
-	const showCodex = !flags.claude || flags.codex;
-	const showClaude = !flags.codex || flags.claude;
+	// - scope "all": show both (default)
+	// - scope "codex": show only Codex
+	// - scope "claude": show only Claude
+	const showCodex = scope === "all" || scope === "codex";
+	const showClaude = scope === "all" || scope === "claude";
 	
 	// Use loadAllAccounts() which includes deduplication by accountId
 	const allAccounts = showCodex ? loadAllAccounts() : [];
@@ -4205,7 +4793,7 @@ async function handleQuota(args, flags) {
 				console.error(`  - ${p}`);
 			}
 			console.error(`  - ${getCodexCliAuthPath()}`);
-			console.error("\nRun 'codex-quota add' to add an account.");
+				console.error(`\nRun '${PRIMARY_CMD} codex add' to add an account.`);
 		}
 		process.exit(1);
 	}
@@ -4245,26 +4833,49 @@ async function handleQuota(args, flags) {
 
 	let claudeResults = null;
 	if (showClaude) {
-		// Try OAuth accounts first (preferred - uses official API)
+		const wantsClaudeLabel = scope === "claude" && Boolean(labelFilter);
 		const oauthAccounts = loadAllClaudeOAuthAccounts();
-		if (oauthAccounts.length) {
+		const filteredOauthAccounts = wantsClaudeLabel
+			? oauthAccounts.filter(account => account.label === labelFilter)
+			: oauthAccounts;
+
+		if (filteredOauthAccounts.length) {
 			const rawResults = await Promise.all(
-				oauthAccounts.map(account => fetchClaudeOAuthUsageForAccount(account))
+				filteredOauthAccounts.map(account => fetchClaudeOAuthUsageForAccount(account))
 			);
-			// Deduplicate by usage fingerprint (same account from different sources has identical usage)
 			claudeResults = deduplicateClaudeResultsByUsage(rawResults);
 		} else {
-			// Fall back to legacy cookie-based accounts
 			const claudeAccounts = loadClaudeAccounts();
-			if (claudeAccounts.length) {
+			const filteredClaudeAccounts = wantsClaudeLabel
+				? claudeAccounts.filter(account => account.label === labelFilter)
+				: claudeAccounts;
+
+			if (filteredClaudeAccounts.length) {
 				const rawResults = await Promise.all(
-					claudeAccounts.map(account => fetchClaudeUsageForCredentials(account))
+					filteredClaudeAccounts.map(account => fetchClaudeUsageForCredentials(account))
 				);
 				claudeResults = deduplicateClaudeResultsByUsage(rawResults);
+			} else if (wantsClaudeLabel) {
+				const availableLabels = new Set([
+					...oauthAccounts.map(account => account.label),
+					...claudeAccounts.map(account => account.label),
+				]);
+				const labelList = Array.from(availableLabels);
+				if (flags.json) {
+					console.log(JSON.stringify({
+						success: false,
+						error: `Claude account "${labelFilter}" not found`,
+						availableLabels: labelList,
+					}, null, 2));
+				} else {
+					console.error(colorize(`Claude account "${labelFilter}" not found.`, RED));
+					if (labelList.length) {
+						console.error(`Available: ${labelList.join(", ")}`);
+					}
+				}
+				process.exit(1);
 			} else {
-				// Last resort: try to find any session credentials
 				const legacyResult = await fetchClaudeUsage();
-				// Only include if it has meaningful data
 				if (legacyResult.success || legacyResult.usage) {
 					claudeResults = [legacyResult];
 				}
@@ -4284,8 +4895,16 @@ async function handleQuota(args, flags) {
 			}, null, 2));
 		} else {
 			console.error(colorize("No accounts found.", RED));
-			console.error("\nRun 'codex-quota add' to add a Codex account.");
-			console.error("Run 'codex-quota claude add' to add a Claude account.");
+			const codexMessage = `Run '${PRIMARY_CMD} codex add' to add a Codex account.`;
+			const claudeMessage = `Run '${PRIMARY_CMD} claude add' to add a Claude account.`;
+			if (scope === "codex") {
+				console.error(`\n${codexMessage}`);
+			} else if (scope === "claude") {
+				console.error(`\n${claudeMessage}`);
+			} else {
+				console.error(`\n${codexMessage}`);
+				console.error(claudeMessage);
+			}
 		}
 		process.exit(1);
 	}
@@ -4343,8 +4962,6 @@ async function main() {
 		json: args.includes("--json"),
 		noBrowser: args.includes("--no-browser"),
 		noColor: args.includes("--no-color"),
-		claude: args.includes("--claude"),
-		codex: args.includes("--codex"),
 		oauth: args.includes("--oauth"),
 		manual: args.includes("--manual"),
 	};
@@ -4352,17 +4969,20 @@ async function main() {
 	// Set global noColorFlag for supportsColor() function
 	noColorFlag = flags.noColor;
 	
+	const legacyFlagUsed = args.includes("--claude") || args.includes("--codex");
+	if (legacyFlagUsed) {
+		console.error(colorize("Error: --claude/--codex flags were replaced by namespaces.", RED));
+		console.error(`Use '${PRIMARY_CMD} claude' or '${PRIMARY_CMD} codex' instead.`);
+		process.exit(1);
+	}
+
 	// Extract non-flag arguments
 	const nonFlagArgs = args.filter(a => !a.startsWith("--") && a !== "-h");
-	
-	// Extract subcommand and remaining args
-	// Known subcommands: add, switch, list, remove, quota (explicit)
-	const SUBCOMMANDS = ["add", "switch", "list", "remove", "quota", "claude"];
 	const firstArg = nonFlagArgs[0];
-	const isSubcommand = firstArg && SUBCOMMANDS.includes(firstArg);
-	
-	const subcommand = isSubcommand ? firstArg : null;
-	const subArgs = isSubcommand ? nonFlagArgs.slice(1) : nonFlagArgs;
+	const namespace = firstArg === "codex" || firstArg === "claude" ? firstArg : null;
+	const namespaceArgs = namespace ? nonFlagArgs.slice(1) : nonFlagArgs;
+	const subcommand = namespace ? namespaceArgs[0] : null;
+	const subArgs = namespace ? namespaceArgs.slice(1) : namespaceArgs;
 	
 	// Handle --version flag
 	if (args.includes("--version") || args.includes("-v")) {
@@ -4370,61 +4990,77 @@ async function main() {
 		return;
 	}
 	
+	const legacyCommands = ["add", "switch", "list", "remove", "quota"];
+	if (!namespace && firstArg && legacyCommands.includes(firstArg)) {
+		console.error(colorize(`Error: '${firstArg}' now requires a namespace.`, RED));
+		console.error(`Use '${PRIMARY_CMD} codex ${firstArg}' or '${PRIMARY_CMD} claude ${firstArg}'.`);
+		process.exit(1);
+	}
+
 	// Handle --help: show main help or subcommand-specific help
 	if (args.includes("--help") || args.includes("-h")) {
+		if (!namespace) {
+			printHelp();
+			return;
+		}
+		if (namespace === "codex") {
+			switch (subcommand) {
+				case "add":
+					printHelpAdd();
+					break;
+				case "switch":
+					printHelpSwitch();
+					break;
+				case "list":
+					printHelpList();
+					break;
+				case "remove":
+					printHelpRemove();
+					break;
+				case "quota":
+					printHelpQuota();
+					break;
+				default:
+					printHelpCodex();
+					break;
+			}
+			return;
+		}
 		switch (subcommand) {
 			case "add":
-				printHelpAdd();
-				break;
-			case "claude":
-				if (subArgs[0] === "add") {
-					printHelpClaudeAdd();
-				} else {
-					printHelpClaude();
-				}
+				printHelpClaudeAdd();
 				break;
 			case "switch":
-				printHelpSwitch();
+				printHelpClaudeSwitch();
 				break;
 			case "list":
-				printHelpList();
+				printHelpClaudeList();
 				break;
 			case "remove":
-				printHelpRemove();
+				printHelpClaudeRemove();
 				break;
 			case "quota":
-				printHelpQuota();
+				printHelpClaudeQuota();
 				break;
 			default:
-				printHelp();
+				printHelpClaude();
 				break;
 		}
 		return;
 	}
 	
 	// Route to appropriate handler based on subcommand
-	switch (subcommand) {
-		case "add":
-			await handleAdd(subArgs, flags);
-			break;
-		case "switch":
-			await handleSwitch(subArgs, flags);
-			break;
-		case "list":
-			await handleList(flags);
-			break;
-		case "remove":
-			await handleRemove(subArgs, flags);
-			break;
-		case "claude":
-			await handleClaude(subArgs, flags);
-			break;
-		case "quota":
-		default:
-			// Default behavior: run quota command
-			await handleQuota(subArgs, flags);
-			break;
+	if (namespace === "codex") {
+		await handleCodex(namespaceArgs, flags);
+		return;
 	}
+	if (namespace === "claude") {
+		await handleClaude(namespaceArgs, flags);
+		return;
+	}
+
+	// Default behavior: run combined quota command
+	await handleQuota(nonFlagArgs, flags, "all");
 }
 
 // Only run main() when executed directly (not imported for testing)
