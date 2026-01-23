@@ -51,12 +51,20 @@ const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const JWT_CLAIM = "https://api.openai.com/auth";
 const JWT_PROFILE = "https://api.openai.com/profile";
 const CLAUDE_CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
+const CLAUDE_MULTI_ACCOUNT_PATHS = [
+	join(homedir(), ".claude-accounts.json"),
+];
 const CLAUDE_API_BASE = "https://claude.ai/api";
 const CLAUDE_ORIGIN = "https://claude.ai";
 const CLAUDE_ORGS_URL = `${CLAUDE_API_BASE}/organizations`;
 const CLAUDE_ACCOUNT_URL = `${CLAUDE_API_BASE}/account`;
 const CLAUDE_TIMEOUT_MS = 15000;
 const CLAUDE_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+// Claude OAuth API configuration (new official endpoint)
+const CLAUDE_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+const CLAUDE_OAUTH_VERSION = "2023-06-01";
+const CLAUDE_OAUTH_BETA = "oauth-2025-04-20";
 
 // CLI command names
 const PRIMARY_CMD = "codex-quota";
@@ -649,11 +657,15 @@ async function fetchUsage(account) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function isClaudeSessionKey(value) {
-	return typeof value === "string" && value.startsWith("sk-ant-oat");
+	return typeof value === "string" && value.startsWith("sk-ant-");
 }
 
 function findClaudeSessionKey(value) {
 	if (isClaudeSessionKey(value)) return value;
+	if (typeof value === "string") {
+		const match = value.match(/sk-ant-[a-z0-9_-]+/i);
+		if (match) return match[0];
+	}
 	if (!value || typeof value !== "object") return null;
 
 	const direct = value.sessionKey
@@ -670,6 +682,82 @@ function findClaudeSessionKey(value) {
 		if (found) return found;
 	}
 	return null;
+}
+
+function normalizeClaudeAccount(raw, source) {
+	if (!raw || typeof raw !== "object") return null;
+	const label = raw.label ?? null;
+	const sessionKey = raw.sessionKey ?? raw.session_key ?? null;
+	const oauthToken = raw.oauthToken ?? raw.oauth_token ?? raw.accessToken ?? raw.access_token ?? null;
+	const cfClearance = raw.cfClearance ?? raw.cf_clearance ?? null;
+	const orgId = raw.orgId ?? raw.org_id ?? null;
+	const cookies = raw.cookies && typeof raw.cookies === "object" ? raw.cookies : null;
+	return {
+		label,
+		sessionKey,
+		oauthToken,
+		cfClearance,
+		orgId,
+		cookies,
+		source,
+	};
+}
+
+function isValidClaudeAccount(account) {
+	if (!account?.label) return false;
+	const sessionKey = account.sessionKey ?? findClaudeSessionKey(account.cookies);
+	const oauthToken = account.oauthToken ?? null;
+	return Boolean(sessionKey || oauthToken);
+}
+
+function loadClaudeAccountsFromEnv() {
+	const envAccounts = process.env.CLAUDE_ACCOUNTS;
+	if (!envAccounts) return [];
+
+	try {
+		const parsed = JSON.parse(envAccounts);
+		const accounts = Array.isArray(parsed) ? parsed : parsed?.accounts ?? [];
+		return accounts
+			.map(a => normalizeClaudeAccount(a, "env"))
+			.filter(a => a && isValidClaudeAccount(a));
+	} catch {
+		console.error("Warning: CLAUDE_ACCOUNTS env var is not valid JSON");
+		return [];
+	}
+}
+
+function loadClaudeAccountsFromFile(filePath) {
+	if (!existsSync(filePath)) return [];
+
+	try {
+		const raw = readFileSync(filePath, "utf-8");
+		const parsed = JSON.parse(raw);
+		const accounts = Array.isArray(parsed) ? parsed : parsed?.accounts ?? [];
+		return accounts
+			.map(a => normalizeClaudeAccount(a, filePath))
+			.filter(a => a && isValidClaudeAccount(a));
+	} catch {
+		return [];
+	}
+}
+
+function loadClaudeAccounts() {
+	const all = [];
+	all.push(...loadClaudeAccountsFromEnv());
+	for (const path of CLAUDE_MULTI_ACCOUNT_PATHS) {
+		all.push(...loadClaudeAccountsFromFile(path));
+	}
+	return all;
+}
+
+function saveClaudeAccounts(accounts) {
+	const targetPath = CLAUDE_MULTI_ACCOUNT_PATHS[0];
+	const dir = dirname(targetPath);
+	if (!existsSync(dir)) {
+		mkdirSync(dir, { recursive: true });
+	}
+	writeFileAtomic(targetPath, JSON.stringify({ accounts }, null, 2) + "\n", { mode: 0o600 });
+	return targetPath;
 }
 
 function loadClaudeSessionFromCredentials() {
@@ -729,6 +817,232 @@ function loadClaudeOAuthToken() {
 			error: `Failed to read Claude credentials: ${err?.message ?? String(err)}`,
 		};
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Claude OAuth Multi-Account Support
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Load Claude OAuth account from Claude Code credentials file
+ * @returns {Array<{ label: string, accessToken: string, refreshToken?: string, expiresAt?: number, subscriptionType?: string, rateLimitTier?: string, scopes?: string[], source: string }>}
+ */
+function loadClaudeOAuthFromClaudeCode() {
+	const credentialsPath = process.env.CLAUDE_CREDENTIALS_PATH || CLAUDE_CREDENTIALS_PATH;
+	if (!existsSync(credentialsPath)) return [];
+
+	try {
+		const raw = readFileSync(credentialsPath, "utf-8");
+		const parsed = JSON.parse(raw);
+		const oauth = parsed?.claudeAiOauth ?? parsed?.claude_ai_oauth;
+
+		if (!oauth?.accessToken) return [];
+
+		// Check if token has user:profile scope (required for usage API)
+		const scopes = oauth.scopes ?? [];
+		if (!scopes.includes("user:profile")) {
+			return [];
+		}
+
+		return [{
+			label: "claude-code",
+			accessToken: oauth.accessToken,
+			refreshToken: oauth.refreshToken,
+			expiresAt: oauth.expiresAt,
+			subscriptionType: oauth.subscriptionType,
+			rateLimitTier: oauth.rateLimitTier,
+			scopes,
+			source: credentialsPath,
+		}];
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Load Claude OAuth account from OpenCode auth.json
+ * @returns {Array<{ label: string, accessToken: string, refreshToken?: string, expiresAt?: number, source: string }>}
+ */
+function loadClaudeOAuthFromOpenCode() {
+	const authPath = getOpencodeAuthPath();
+	if (!existsSync(authPath)) return [];
+
+	try {
+		const raw = readFileSync(authPath, "utf-8");
+		const parsed = JSON.parse(raw);
+		const anthropic = parsed?.anthropic;
+
+		if (!anthropic?.access) return [];
+
+		return [{
+			label: "opencode",
+			accessToken: anthropic.access,
+			refreshToken: anthropic.refresh,
+			expiresAt: anthropic.expires,
+			source: authPath,
+		}];
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Load Claude OAuth accounts from environment variable
+ * Format: JSON array with { label, accessToken, refreshToken?, ... }
+ * @returns {Array<{ label: string, accessToken: string, ... }>}
+ */
+function loadClaudeOAuthFromEnv() {
+	const envAccounts = process.env.CLAUDE_OAUTH_ACCOUNTS;
+	if (!envAccounts) return [];
+
+	try {
+		const parsed = JSON.parse(envAccounts);
+		const accounts = Array.isArray(parsed) ? parsed : parsed?.accounts ?? [];
+		return accounts
+			.filter(a => a?.label && a?.accessToken)
+			.map(a => ({ ...a, source: "env:CLAUDE_OAUTH_ACCOUNTS" }));
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Load all Claude OAuth accounts from all sources
+ * Sources (in priority order):
+ *   1. CLAUDE_OAUTH_ACCOUNTS env var
+ *   2. ~/.claude-accounts.json (accounts with oauthToken field)
+ *   3. ~/.claude/.credentials.json (Claude Code)
+ *   4. ~/.local/share/opencode/auth.json (OpenCode)
+ * @returns {Array<{ label: string, accessToken: string, refreshToken?: string, expiresAt?: number, subscriptionType?: string, rateLimitTier?: string, source: string }>}
+ */
+function loadAllClaudeOAuthAccounts() {
+	const all = [];
+	const seenLabels = new Set();
+
+	// 1. Environment variable
+	for (const account of loadClaudeOAuthFromEnv()) {
+		if (!seenLabels.has(account.label)) {
+			seenLabels.add(account.label);
+			all.push(account);
+		}
+	}
+
+	// 2. Multi-account file (accounts with oauthToken)
+	for (const path of CLAUDE_MULTI_ACCOUNT_PATHS) {
+		const accounts = loadClaudeAccountsFromFile(path);
+		for (const account of accounts) {
+			if (account.oauthToken && !seenLabels.has(account.label)) {
+				seenLabels.add(account.label);
+				all.push({
+					label: account.label,
+					accessToken: account.oauthToken,
+					source: account.source,
+				});
+			}
+		}
+	}
+
+	// 3. Claude Code credentials
+	for (const account of loadClaudeOAuthFromClaudeCode()) {
+		if (!seenLabels.has(account.label)) {
+			seenLabels.add(account.label);
+			all.push(account);
+		}
+	}
+
+	// 4. OpenCode credentials
+	for (const account of loadClaudeOAuthFromOpenCode()) {
+		if (!seenLabels.has(account.label)) {
+			seenLabels.add(account.label);
+			all.push(account);
+		}
+	}
+
+	return all;
+}
+
+/**
+ * Fetch Claude usage via OAuth API (new official endpoint)
+ * Endpoint: GET https://api.anthropic.com/api/oauth/usage
+ * Required headers:
+ *   - Authorization: Bearer <access_token>
+ *   - anthropic-version: 2023-06-01
+ *   - anthropic-beta: oauth-2025-04-20
+ * @param {string} accessToken - OAuth access token with user:profile scope
+ * @returns {Promise<{ success: boolean, data?: object, error?: string }>}
+ */
+async function fetchClaudeOAuthUsage(accessToken) {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), CLAUDE_TIMEOUT_MS);
+
+	try {
+		const res = await fetch(CLAUDE_OAUTH_USAGE_URL, {
+			method: "GET",
+			headers: {
+				Authorization: `Bearer ${accessToken}`,
+				"anthropic-version": CLAUDE_OAUTH_VERSION,
+				"anthropic-beta": CLAUDE_OAUTH_BETA,
+			},
+			signal: controller.signal,
+		});
+
+		if (!res.ok) {
+			const body = await res.text().catch(() => "");
+			return {
+				success: false,
+				error: `HTTP ${res.status}: ${body.slice(0, 200) || res.statusText}`,
+			};
+		}
+
+		const data = await res.json();
+		return { success: true, data };
+	} catch (err) {
+		const message = err.name === "AbortError" ? "Request timed out" : err.message;
+		return { success: false, error: message };
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+/**
+ * Fetch usage for a Claude OAuth account
+ * @param {{ label: string, accessToken: string, ... }} account - OAuth account
+ * @returns {Promise<{ success: boolean, label: string, source: string, usage?: object, ... }>}
+ */
+async function fetchClaudeOAuthUsageForAccount(account) {
+	// Check token expiry
+	if (account.expiresAt && account.expiresAt < Date.now()) {
+		return {
+			success: false,
+			label: account.label,
+			source: account.source,
+			error: "OAuth token expired - run 'claude /login' to refresh",
+			subscriptionType: account.subscriptionType,
+			rateLimitTier: account.rateLimitTier,
+		};
+	}
+
+	const result = await fetchClaudeOAuthUsage(account.accessToken);
+
+	if (!result.success) {
+		return {
+			success: false,
+			label: account.label,
+			source: account.source,
+			error: result.error,
+			subscriptionType: account.subscriptionType,
+			rateLimitTier: account.rateLimitTier,
+		};
+	}
+
+	return {
+		success: true,
+		label: account.label,
+		source: account.source,
+		usage: result.data,
+		subscriptionType: account.subscriptionType,
+		rateLimitTier: account.rateLimitTier,
+	};
 }
 
 function getChromeSafeStoragePassword() {
@@ -923,6 +1237,9 @@ function buildClaudeHeaders(sessionKey, cfClearance, bearerToken, mode, cookies)
 		"x-requested-with": "XMLHttpRequest",
 	};
 	if (mode.includes("cookie")) {
+		if (!sessionKey && !(cookies && typeof cookies === "object")) {
+			return headers;
+		}
 		let parts = [];
 		if (cookies && typeof cookies === "object") {
 			parts = Object.entries(cookies)
@@ -949,13 +1266,16 @@ async function fetchClaudeJson(url, sessionKey, cfClearance, oauthToken, cookies
 	const timeout = setTimeout(() => controller.abort(), CLAUDE_TIMEOUT_MS);
 
 	try {
-		const attempts = [
-			{ mode: "cookie", bearer: null },
-			{ mode: "bearer", bearer: sessionKey },
-			{ mode: "bearer", bearer: oauthToken },
-			{ mode: "cookie+bearer", bearer: sessionKey },
-			{ mode: "cookie+bearer", bearer: oauthToken },
-		];
+		const attempts = [];
+		const hasCookie = Boolean(sessionKey || (cookies && typeof cookies === "object"));
+		const hasSessionBearer = Boolean(sessionKey);
+		const hasOauthBearer = Boolean(oauthToken);
+
+		if (hasCookie) attempts.push({ mode: "cookie", bearer: null });
+		if (hasSessionBearer) attempts.push({ mode: "bearer", bearer: sessionKey });
+		if (hasOauthBearer) attempts.push({ mode: "bearer", bearer: oauthToken });
+		if (hasCookie && hasSessionBearer) attempts.push({ mode: "cookie+bearer", bearer: sessionKey });
+		if (hasCookie && hasOauthBearer) attempts.push({ mode: "cookie+bearer", bearer: oauthToken });
 		let lastError = null;
 
 		for (const attempt of attempts) {
@@ -1061,6 +1381,140 @@ function extractClaudeOrgId(payload) {
 	const first = orgs[0];
 	if (typeof first === "string") return first;
 	return first?.id ?? first?.uuid ?? first?.organizationId ?? first?.orgId ?? first?.org_id ?? null;
+}
+
+async function fetchClaudeUsageForCredentials(credentials) {
+	const sessionKey = credentials.sessionKey ?? findClaudeSessionKey(credentials.cookies);
+	const oauthToken = credentials.oauthToken ?? null;
+	const cfClearance = credentials.cfClearance ?? credentials.cookies?.cf_clearance ?? credentials.cookies?.cfClearance ?? null;
+	const cookies = credentials.cookies ?? null;
+
+	if (!sessionKey && !oauthToken && !cookies) {
+		return {
+			success: false,
+			label: credentials.label ?? null,
+			source: credentials.source ?? null,
+			error: "Missing Claude session key or OAuth token",
+		};
+	}
+
+	let lastAuthError = null;
+	const tryUsageForOrg = async (orgId) => {
+		const normalizedOrgId = normalizeClaudeOrgId(orgId);
+		const usageUrl = `${CLAUDE_API_BASE}/organizations/${normalizedOrgId}/usage`;
+		const overageUrl = `${CLAUDE_API_BASE}/organizations/${normalizedOrgId}/overage_spend_limit`;
+
+		const [usageResponse, overageResponse, accountResponse] = await Promise.all([
+			fetchClaudeJson(
+				usageUrl,
+				sessionKey,
+				cfClearance,
+				oauthToken,
+				cookies
+			),
+			fetchClaudeJson(
+				overageUrl,
+				sessionKey,
+				cfClearance,
+				oauthToken,
+				cookies
+			),
+			fetchClaudeJson(
+				CLAUDE_ACCOUNT_URL,
+				sessionKey,
+				cfClearance,
+				oauthToken,
+				cookies
+			),
+		]);
+
+		const errors = {};
+		if (usageResponse.error) errors.usage = usageResponse.error;
+		if (overageResponse.error) errors.overage = overageResponse.error;
+		if (accountResponse.error) errors.account = accountResponse.error;
+
+		return { usageResponse, overageResponse, accountResponse, errors, orgId };
+	};
+
+	const cookieOrg = credentials.cookies?.lastActiveOrg;
+	const configuredOrg = credentials.orgId ?? null;
+
+	if (configuredOrg || cookieOrg) {
+		const orgAttempt = await tryUsageForOrg(configuredOrg ?? cookieOrg);
+		const authErrors = Object.values(orgAttempt.errors).some(isClaudeAuthError);
+		if (!authErrors) {
+			return {
+				success: true,
+				label: credentials.label ?? null,
+				source: credentials.source ?? null,
+				orgId: orgAttempt.orgId,
+				usage: orgAttempt.usageResponse.data ?? null,
+				overage: orgAttempt.overageResponse.data ?? null,
+				account: orgAttempt.accountResponse.data ?? null,
+				errors: Object.keys(orgAttempt.errors).length ? orgAttempt.errors : null,
+			};
+		}
+		lastAuthError = orgAttempt.errors.usage || orgAttempt.errors.overage || lastAuthError;
+	}
+
+	const orgsResponse = await fetchClaudeJson(
+		CLAUDE_ORGS_URL,
+		sessionKey,
+		cfClearance,
+		oauthToken,
+		cookies
+	);
+	if (orgsResponse.error) {
+		const errorText = String(orgsResponse.error);
+		const isAuthError = /account_session_invalid|invalid authorization|http 401|http 403/i.test(errorText);
+		if (isAuthError) {
+			lastAuthError = orgsResponse.error;
+			return {
+				success: false,
+				label: credentials.label ?? null,
+				source: credentials.source ?? null,
+				error: `Organizations request failed: ${lastAuthError}`,
+			};
+		}
+		return {
+			success: false,
+			label: credentials.label ?? null,
+			source: credentials.source ?? null,
+			error: `Organizations request failed: ${orgsResponse.error}`,
+		};
+	}
+
+	const orgId = extractClaudeOrgId(orgsResponse.data);
+	if (!orgId) {
+		return {
+			success: false,
+			label: credentials.label ?? null,
+			source: credentials.source ?? null,
+			error: "No Claude organization ID found",
+		};
+	}
+
+	const orgAttempt = await tryUsageForOrg(orgId);
+	const authErrors = Object.values(orgAttempt.errors).some(isClaudeAuthError);
+	if (!authErrors) {
+		return {
+			success: true,
+			label: credentials.label ?? null,
+			source: credentials.source ?? null,
+			orgId,
+			usage: orgAttempt.usageResponse.data ?? null,
+			overage: orgAttempt.overageResponse.data ?? null,
+			account: orgAttempt.accountResponse.data ?? null,
+			errors: Object.keys(orgAttempt.errors).length ? orgAttempt.errors : null,
+		};
+	}
+
+	return {
+		success: false,
+		label: credentials.label ?? null,
+		source: credentials.source ?? null,
+		error: `Organizations request failed: ${lastAuthError || "Invalid authorization"}`,
+	};
 }
 
 async function fetchClaudeUsage() {
@@ -1537,7 +1991,10 @@ function buildClaudeUsageLines(payload) {
 	const membership = Array.isArray(account.memberships)
 		? account.memberships.find(m => normalizeClaudeOrgId(m?.organization?.uuid) === normalizeClaudeOrgId(payload?.orgId))
 		: null;
-	const plan = account.plan
+	// Support both old format (from account API) and new OAuth format (from credentials)
+	const plan = payload?.subscriptionType
+		?? payload?.rateLimitTier
+		?? account.plan
 		?? account.plan_type
 		?? account.planType
 		?? account?.subscription?.plan
@@ -1548,10 +2005,11 @@ function buildClaudeUsageLines(payload) {
 		planDisplay = formatClaudeLabel(
 			String(plan)
 				.replace(/^default_/, "")
-				.replace(/_\\d+x$/i, "")
+				.replace(/_\d+x$/i, "")
 		);
 	}
-	const header = `Claude${email ? ` <${email}>` : ""}${planDisplay ? ` (${planDisplay})` : ""}`;
+	const label = payload?.label ? ` (${payload.label})` : "";
+	const header = `Claude${label}${email ? ` <${email}>` : ""}${planDisplay ? ` (${planDisplay})` : ""}`;
 
 	lines.push(header);
 	lines.push("");
@@ -1637,6 +2095,7 @@ Usage:
 Commands:
   quota [label]     Check usage quota (default command)
   add [label]       Add a new account via OAuth browser flow
+  claude add [label] Add a Claude credential for quota tracking
   switch <label>    Switch active account for Codex CLI, OpenCode, and pi
   list              List all accounts from all sources
   remove <label>    Remove an account from storage
@@ -1645,7 +2104,7 @@ Options:
   --json            Output in JSON format
   --no-browser      Print auth URL instead of opening browser
   --no-color        Disable colored output
-  --claude          Include Claude Code usage (uses ~/.claude/.credentials.json)
+  --claude          Include Claude Code usage (uses CLAUDE_ACCOUNTS or ~/.claude-accounts.json)
   --version, -v     Show version number
   --help, -h        Show this help
 
@@ -1653,6 +2112,7 @@ Examples:
   ${PRIMARY_CMD}                   Check quota for all accounts
   ${PRIMARY_CMD} personal          Check quota for "personal" account
   ${PRIMARY_CMD} add work          Add new account with label "work"
+  ${PRIMARY_CMD} claude add work   Add a Claude credential with label "work"
   ${PRIMARY_CMD} switch personal   Switch to "personal" account
   ${PRIMARY_CMD} list              List all configured accounts
   ${PRIMARY_CMD} remove old        Remove "old" account
@@ -1669,6 +2129,49 @@ OpenCode & pi Integration:
   authentication files when they exist, enabling seamless account switching.
 
 Run '${PRIMARY_CMD} <command> --help' for help on a specific command.
+`);
+}
+
+function printHelpClaude() {
+	console.log(`${PRIMARY_CMD} claude - Manage Claude credentials
+
+Usage:
+  ${PRIMARY_CMD} claude add [label] [options]
+
+Commands:
+  add [label]       Add a Claude credential interactively
+
+Options:
+  --json            Output result in JSON format
+  --help, -h        Show this help
+
+Examples:
+  ${PRIMARY_CMD} claude add                 Add Claude credential (prompt for label)
+  ${PRIMARY_CMD} claude add work            Add Claude credential with label "work"
+  ${PRIMARY_CMD} claude add work --json     JSON output for scripting
+`);
+}
+
+function printHelpClaudeAdd() {
+	console.log(`${PRIMARY_CMD} claude add - Add a Claude credential interactively
+
+Usage:
+  ${PRIMARY_CMD} claude add [label] [options]
+
+Arguments:
+  label             Optional label for the Claude credential (e.g., "work", "personal")
+
+Options:
+  --json            Output result in JSON format
+  --help, -h        Show this help
+
+Description:
+  Prompts for Claude session credentials and saves them to ~/.claude-accounts.json.
+  You can provide either a sessionKey or an OAuth token (one is required).
+
+Examples:
+  ${PRIMARY_CMD} claude add
+  ${PRIMARY_CMD} claude add work
 `);
 }
 
@@ -1751,7 +2254,7 @@ Usage:
 
 Options:
   --json            Output in JSON format
-  --claude          Include Claude Code usage (uses ~/.claude/.credentials.json)
+  --claude          Include Claude Code usage (uses CLAUDE_ACCOUNTS or ~/.claude-accounts.json)
   --help, -h        Show this help
 
 Description:
@@ -1761,6 +2264,7 @@ Description:
   - Token expiry status
   - Source file location
   - Active indicator (* for the current account in ~/.codex/auth.json)
+  With --claude, also lists configured Claude accounts.
 
 Output columns:
   * = active        Currently active account
@@ -1823,7 +2327,7 @@ Arguments:
 
 Options:
   --json            Output in JSON format
-  --claude          Include Claude Code usage (uses ~/.claude/.credentials.json)
+  --claude          Include Claude Code usage (uses CLAUDE_ACCOUNTS or ~/.claude-accounts.json)
   --help, -h        Show this help
 
 Description:
@@ -2747,9 +3251,10 @@ function shortenPath(filePath) {
  */
 async function handleList(flags) {
 	const accounts = loadAllAccounts();
+	const claudeAccounts = flags.claude ? loadClaudeAccounts() : [];
 	
 	// Handle zero accounts case
-	if (!accounts.length) {
+	if (!accounts.length && !flags.claude) {
 		if (flags.json) {
 			console.log(JSON.stringify({ accounts: [] }, null, 2));
 			return;
@@ -2816,14 +3321,25 @@ async function handleList(flags) {
 				divergence: divergenceDetected,
 			},
 		};
+		if (flags.claude) {
+			output.claudeAccounts = claudeAccounts.map(account => ({
+				label: account.label,
+				source: account.source,
+				hasSessionKey: Boolean(account.sessionKey ?? findClaudeSessionKey(account.cookies)),
+				hasOauthToken: Boolean(account.oauthToken),
+				orgId: account.orgId ?? null,
+			}));
+		}
 		console.log(JSON.stringify(output, null, 2));
 		return;
 	}
 	
 	// Human-readable output with box styling
 	const lines = [];
-	lines.push(`Accounts (${accounts.length} total)`);
-	lines.push("");
+	if (accounts.length) {
+		lines.push(`Accounts (${accounts.length} total)`);
+		lines.push("");
+	}
 	
 	for (let i = 0; i < accountDetails.length; i++) {
 		const detail = accountDetails[i];
@@ -2872,9 +3388,45 @@ async function handleList(flags) {
 			lines.push("~ = native login (run 'cq switch' to manage)");
 		}
 	}
-	
-	const boxLines = drawBox(lines);
-	console.log(boxLines.join("\n"));
+
+	if (lines.length) {
+		const boxLines = drawBox(lines);
+		console.log(boxLines.join("\n"));
+	}
+
+	if (flags.claude) {
+		const claudeLines = [];
+		claudeLines.push(`Claude Accounts (${claudeAccounts.length} total)`);
+		claudeLines.push("");
+		if (!claudeAccounts.length) {
+			claudeLines.push("No Claude accounts found.");
+			claudeLines.push("");
+			claudeLines.push("Searched:");
+			claudeLines.push("  - CLAUDE_ACCOUNTS env var");
+			for (const p of CLAUDE_MULTI_ACCOUNT_PATHS) {
+				claudeLines.push(`  - ${p}`);
+			}
+		} else {
+			for (let i = 0; i < claudeAccounts.length; i++) {
+				const account = claudeAccounts[i];
+				const authParts = [];
+				if (account.sessionKey ?? findClaudeSessionKey(account.cookies)) {
+					authParts.push("sessionKey");
+				}
+				if (account.oauthToken) {
+					authParts.push("oauthToken");
+				}
+				const authDisplay = authParts.length ? authParts.join("+") : "unknown";
+				claudeLines.push(`${account.label}`);
+				claudeLines.push(`  Auth: ${authDisplay} | ${shortenPath(account.source)}`);
+				if (i < claudeAccounts.length - 1) {
+					claudeLines.push("");
+				}
+			}
+		}
+		const claudeBox = drawBox(claudeLines);
+		console.log(claudeBox.join("\n"));
+	}
 }
 
 /**
@@ -2892,6 +3444,25 @@ async function promptConfirm(message) {
 		rl.question(`${message} [y/N] `, (answer) => {
 			rl.close();
 			resolve(answer.toLowerCase() === "y");
+		});
+	});
+}
+
+async function promptInput(message, options = {}) {
+	const { allowEmpty = false } = options;
+	const rl = createInterface({
+		input: process.stdin,
+		output: process.stdout,
+	});
+
+	return new Promise((resolve) => {
+		rl.question(message, (answer) => {
+			rl.close();
+			if (allowEmpty) {
+				resolve(answer);
+				return;
+			}
+			resolve(answer.trim());
 		});
 	});
 }
@@ -3089,6 +3660,124 @@ async function handleRemove(args, flags) {
 }
 
 /**
+ * Handle Claude add subcommand - add a Claude credential interactively
+ * @param {string[]} args - Non-flag arguments (optional label)
+ * @param {{ json: boolean }} flags - Parsed flags
+ */
+async function handleClaudeAdd(args, flags) {
+	let label = args[0] || null;
+	try {
+		const existingAccounts = loadClaudeAccounts();
+		const existingLabels = new Set(existingAccounts.map(a => a.label));
+
+		if (!label) {
+			label = (await promptInput("Label (e.g., work, personal): ")).trim();
+		}
+		if (!label) {
+			throw new Error("Label is required");
+		}
+		if (!/^[a-zA-Z0-9_-]+$/.test(label)) {
+			throw new Error(`Invalid label "${label}". Use only letters, numbers, hyphens, and underscores.`);
+		}
+		if (existingLabels.has(label)) {
+			throw new Error(`Label "${label}" already exists. Choose a different label.`);
+		}
+
+		console.log("Paste your Claude sessionKey or OAuth token.");
+		const sessionKeyInput = await promptInput("sessionKey (sk-ant-...): ", { allowEmpty: true });
+		const oauthTokenInput = await promptInput("oauthToken (optional): ", { allowEmpty: true });
+		const cfClearanceInput = await promptInput("cfClearance (optional): ", { allowEmpty: true });
+		const orgIdInput = await promptInput("orgId (optional): ", { allowEmpty: true });
+
+		let parsedInput = null;
+		if (sessionKeyInput && sessionKeyInput.trim().startsWith("{")) {
+			try {
+				parsedInput = JSON.parse(sessionKeyInput);
+			} catch {
+				parsedInput = null;
+			}
+		}
+
+		const sessionKey = findClaudeSessionKey(parsedInput ?? sessionKeyInput) ?? null;
+		const oauthToken = oauthTokenInput?.trim()
+			|| parsedInput?.claudeAiOauth?.accessToken
+			|| parsedInput?.claude_ai_oauth?.accessToken
+			|| parsedInput?.accessToken
+			|| parsedInput?.access_token
+			|| null;
+		const cfClearance = cfClearanceInput?.trim() || null;
+		const orgId = orgIdInput?.trim() || null;
+
+		if (!sessionKey && !oauthToken) {
+			throw new Error("Provide at least a sessionKey or an OAuth token.");
+		}
+
+		const newAccount = {
+			label,
+			sessionKey,
+			oauthToken,
+			cfClearance,
+			orgId,
+		};
+
+		const accounts = [...existingAccounts, newAccount];
+		const targetPath = saveClaudeAccounts(accounts);
+
+		if (flags.json) {
+			console.log(JSON.stringify({
+				success: true,
+				label,
+				source: targetPath,
+			}, null, 2));
+			return;
+		}
+
+		const lines = [
+			colorize(`Added Claude credential ${label}`, GREEN),
+			"",
+			`Saved to: ${shortenPath(targetPath)}`,
+			"",
+			`Run '${PRIMARY_CMD} --claude' to check Claude usage`,
+		];
+		console.log(drawBox(lines).join("\n"));
+	} catch (error) {
+		if (flags.json) {
+			console.log(JSON.stringify({
+				success: false,
+				error: error.message,
+			}, null, 2));
+		} else {
+			console.error(colorize(`Error: ${error.message}`, RED));
+		}
+		process.exit(1);
+	}
+}
+
+/**
+ * Handle Claude subcommand entrypoint
+ * @param {string[]} args - Claude subcommand args
+ * @param {{ json: boolean }} flags - Parsed flags
+ */
+async function handleClaude(args, flags) {
+	const subcommand = args[0];
+	const subArgs = args.slice(1);
+
+	if (!subcommand || subcommand === "help") {
+		printHelpClaude();
+		return;
+	}
+
+	switch (subcommand) {
+		case "add":
+			await handleClaudeAdd(subArgs.filter(a => !a.startsWith("--")), flags);
+			break;
+		default:
+			printHelpClaude();
+			process.exit(1);
+	}
+}
+
+/**
  * Handle quota subcommand (default behavior)
  * @param {string[]} args - Non-flag arguments (e.g., label filter)
  * @param {{ json: boolean, claude?: boolean }} flags - Parsed flags
@@ -3168,9 +3857,26 @@ async function handleQuota(args, flags) {
 		results.push({ account, usage });
 	}
 
-	let claudeResult = null;
+	let claudeResults = null;
 	if (includeClaude) {
-		claudeResult = await fetchClaudeUsage();
+		// Try OAuth accounts first (preferred - uses official API)
+		const oauthAccounts = loadAllClaudeOAuthAccounts();
+		if (oauthAccounts.length) {
+			claudeResults = await Promise.all(
+				oauthAccounts.map(account => fetchClaudeOAuthUsageForAccount(account))
+			);
+		} else {
+			// Fall back to legacy cookie-based accounts
+			const claudeAccounts = loadClaudeAccounts();
+			if (claudeAccounts.length) {
+				claudeResults = await Promise.all(
+					claudeAccounts.map(account => fetchClaudeUsageForCredentials(account))
+				);
+			} else {
+				// Last resort: try to find any session credentials
+				claudeResults = [await fetchClaudeUsage()];
+			}
+		}
 	}
 
 	if (flags.json) {
@@ -3188,7 +3894,7 @@ async function handleQuota(args, flags) {
 		if (includeClaude) {
 			console.log(JSON.stringify({
 				openai: openaiOutput,
-				claude: claudeResult,
+				claude: claudeResults,
 			}, null, 2));
 			return;
 		}
@@ -3202,10 +3908,12 @@ async function handleQuota(args, flags) {
 		console.log(boxLines.join("\n"));
 	}
 
-	if (includeClaude) {
-		const lines = buildClaudeUsageLines(claudeResult);
-		const boxLines = drawBox(lines);
-		console.log(boxLines.join("\n"));
+	if (includeClaude && claudeResults) {
+		for (const result of claudeResults) {
+			const lines = buildClaudeUsageLines(result);
+			const boxLines = drawBox(lines);
+			console.log(boxLines.join("\n"));
+		}
 	}
 }
 
@@ -3232,7 +3940,7 @@ async function main() {
 	
 	// Extract subcommand and remaining args
 	// Known subcommands: add, switch, list, remove, quota (explicit)
-	const SUBCOMMANDS = ["add", "switch", "list", "remove", "quota"];
+	const SUBCOMMANDS = ["add", "switch", "list", "remove", "quota", "claude"];
 	const firstArg = nonFlagArgs[0];
 	const isSubcommand = firstArg && SUBCOMMANDS.includes(firstArg);
 	
@@ -3250,6 +3958,13 @@ async function main() {
 		switch (subcommand) {
 			case "add":
 				printHelpAdd();
+				break;
+			case "claude":
+				if (subArgs[0] === "add") {
+					printHelpClaudeAdd();
+				} else {
+					printHelpClaude();
+				}
 				break;
 			case "switch":
 				printHelpSwitch();
@@ -3283,6 +3998,9 @@ async function main() {
 			break;
 		case "remove":
 			await handleRemove(subArgs, flags);
+			break;
+		case "claude":
+			await handleClaude(subArgs, flags);
 			break;
 		case "quota":
 		default:
@@ -3329,6 +4047,18 @@ export {
 	findAccountByLabel,
 	getAllLabels,
 	isValidAccount,
+	loadClaudeAccountsFromEnv,
+	loadClaudeAccountsFromFile,
+	loadClaudeAccounts,
+	isValidClaudeAccount,
+	
+	// Claude OAuth functions
+	loadClaudeOAuthFromClaudeCode,
+	loadClaudeOAuthFromOpenCode,
+	loadClaudeOAuthFromEnv,
+	loadAllClaudeOAuthAccounts,
+	fetchClaudeOAuthUsage,
+	fetchClaudeOAuthUsageForAccount,
 	
 	// OAuth PKCE utilities
 	generatePKCE,
@@ -3354,6 +4084,7 @@ export {
 	// Subcommand handlers (for testing)
 	handleSwitch,
 	handleRemove,
+	handleClaudeAdd,
 	
 	// Color utilities
 	supportsColor,
@@ -3364,11 +4095,14 @@ export {
 	MULTI_ACCOUNT_PATHS,
 	CODEX_CLI_AUTH_PATH,
 	PRIMARY_CMD,
+	CLAUDE_MULTI_ACCOUNT_PATHS,
 
 	
 	// Help functions (for testing)
 	printHelp,
 	printHelpAdd,
+	printHelpClaude,
+	printHelpClaudeAdd,
 	printHelpSwitch,
 	printHelpList,
 	printHelpRemove,
