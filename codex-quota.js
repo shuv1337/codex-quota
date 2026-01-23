@@ -65,6 +65,7 @@ const CLAUDE_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (K
 const CLAUDE_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_OAUTH_VERSION = "2023-06-01";
 const CLAUDE_OAUTH_BETA = "oauth-2025-04-20";
+const CLAUDE_OAUTH_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
 // Claude OAuth browser flow configuration
 const CLAUDE_OAUTH_AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
@@ -771,6 +772,228 @@ function updatePiClaudeAuth(account) {
 	return { updated: true, path: authPath };
 }
 
+function isClaudeOauthTokenMatch({
+	storedAccess,
+	storedRefresh,
+	previousAccess,
+	previousRefresh,
+	label,
+	storedLabel,
+}) {
+	if (previousRefresh && storedRefresh && storedRefresh === previousRefresh) return true;
+	if (previousAccess && storedAccess && storedAccess === previousAccess) return true;
+	if (!storedAccess && !storedRefresh && label && storedLabel && label === storedLabel) return true;
+	return false;
+}
+
+function normalizeClaudeOauthEntryTokens(entry) {
+	return {
+		access: entry?.oauthToken
+			?? entry?.oauth_token
+			?? entry?.accessToken
+			?? entry?.access_token
+			?? null,
+		refresh: entry?.oauthRefreshToken
+			?? entry?.oauth_refresh_token
+			?? entry?.refreshToken
+			?? entry?.refresh_token
+			?? null,
+		scopes: entry?.oauthScopes
+			?? entry?.oauth_scopes
+			?? entry?.scopes
+			?? null,
+		expires: entry?.oauthExpiresAt
+			?? entry?.oauth_expires_at
+			?? entry?.expiresAt
+			?? entry?.expires_at
+			?? null,
+	};
+}
+
+function updateClaudeOauthEntry(entry, account) {
+	const accessKey = "oauthToken" in entry
+		? "oauthToken"
+		: "oauth_token" in entry
+			? "oauth_token"
+			: "accessToken" in entry
+				? "accessToken"
+				: "access_token" in entry
+					? "access_token"
+					: "oauthToken";
+	const refreshKey = "oauthRefreshToken" in entry
+		? "oauthRefreshToken"
+		: "oauth_refresh_token" in entry
+			? "oauth_refresh_token"
+			: "refreshToken" in entry
+				? "refreshToken"
+				: "refresh_token" in entry
+					? "refresh_token"
+					: "oauthRefreshToken";
+	const expiresKey = "oauthExpiresAt" in entry
+		? "oauthExpiresAt"
+		: "oauth_expires_at" in entry
+			? "oauth_expires_at"
+			: "expiresAt" in entry
+				? "expiresAt"
+				: "expires_at" in entry
+					? "expires_at"
+					: "oauthExpiresAt";
+	const scopesKey = "oauthScopes" in entry
+		? "oauthScopes"
+		: "oauth_scopes" in entry
+			? "oauth_scopes"
+			: "scopes" in entry
+				? "scopes"
+				: "oauthScopes";
+
+	entry[accessKey] = account.accessToken;
+	entry[refreshKey] = account.refreshToken ?? null;
+	entry[expiresKey] = account.expiresAt ?? null;
+	if (account.scopes) {
+		entry[scopesKey] = account.scopes;
+	}
+
+	return entry;
+}
+
+/**
+ * Persist refreshed Claude OAuth tokens to all known stores that match.
+ * @param {{ label: string, accessToken: string, refreshToken?: string | null, expiresAt?: number | null, scopes?: string[] | null, source?: string }} account
+ * @param {{ previousAccessToken?: string | null, previousRefreshToken?: string | null }} previousTokens
+ * @returns {{ updatedPaths: string[], errors: string[] }}
+ */
+function persistClaudeOAuthTokens(account, previousTokens = {}) {
+	const updatedPaths = [];
+	const errors = [];
+	const previousAccess = previousTokens.previousAccessToken ?? null;
+	const previousRefresh = previousTokens.previousRefreshToken ?? null;
+
+	const updatePayload = {
+		oauthToken: account.accessToken,
+		oauthRefreshToken: account.refreshToken ?? null,
+		oauthExpiresAt: account.expiresAt ?? null,
+		oauthScopes: account.scopes ?? null,
+	};
+
+	if (!account.source?.startsWith("env")) {
+		const credentialsPath = process.env.CLAUDE_CREDENTIALS_PATH || CLAUDE_CREDENTIALS_PATH;
+		if (existsSync(credentialsPath)) {
+			try {
+				const raw = readFileSync(credentialsPath, "utf-8");
+				const parsed = JSON.parse(raw);
+				const oauth = parsed?.claudeAiOauth ?? parsed?.claude_ai_oauth ?? null;
+				const stored = normalizeClaudeOauthEntryTokens(oauth ?? {});
+				if (isClaudeOauthTokenMatch({
+					storedAccess: stored.access,
+					storedRefresh: stored.refresh,
+					previousAccess,
+					previousRefresh,
+					label: account.label,
+					storedLabel: "claude-code",
+				})) {
+					const scopes = account.scopes ?? stored.scopes ?? null;
+					const result = updateClaudeCredentials({
+						...updatePayload,
+						oauthScopes: scopes,
+					});
+					if (result.updated) updatedPaths.push(result.path);
+					if (result.error) errors.push(result.error);
+				}
+			} catch {
+				// ignore parse errors, handled by updateClaudeCredentials
+			}
+		}
+
+		const opencodePath = getOpencodeAuthPath();
+		if (existsSync(opencodePath)) {
+			try {
+				const raw = readFileSync(opencodePath, "utf-8");
+				const parsed = JSON.parse(raw);
+				const anthropic = parsed?.anthropic ?? null;
+				const storedAccess = anthropic?.access ?? null;
+				const storedRefresh = anthropic?.refresh ?? null;
+				if (isClaudeOauthTokenMatch({
+					storedAccess,
+					storedRefresh,
+					previousAccess,
+					previousRefresh,
+					label: account.label,
+					storedLabel: "opencode",
+				})) {
+					const result = updateOpencodeClaudeAuth(updatePayload);
+					if (result.updated) updatedPaths.push(result.path);
+					if (result.error) errors.push(result.error);
+				}
+			} catch {
+				// ignore
+			}
+		}
+
+		const piPath = getPiAuthPath();
+		if (existsSync(piPath)) {
+			try {
+				const raw = readFileSync(piPath, "utf-8");
+				const parsed = JSON.parse(raw);
+				const anthropic = parsed?.anthropic ?? null;
+				const storedAccess = anthropic?.access ?? null;
+				const storedRefresh = anthropic?.refresh ?? null;
+				if (isClaudeOauthTokenMatch({
+					storedAccess,
+					storedRefresh,
+					previousAccess,
+					previousRefresh,
+					label: account.label,
+					storedLabel: "pi",
+				})) {
+					const result = updatePiClaudeAuth(updatePayload);
+					if (result.updated) updatedPaths.push(result.path);
+					if (result.error) errors.push(result.error);
+				}
+			} catch {
+				// ignore
+			}
+		}
+
+		for (const path of CLAUDE_MULTI_ACCOUNT_PATHS) {
+			if (!existsSync(path)) continue;
+			try {
+				const raw = readFileSync(path, "utf-8");
+				const parsed = JSON.parse(raw);
+				const isArray = Array.isArray(parsed);
+				const accounts = isArray ? parsed : parsed?.accounts ?? [];
+				let updated = false;
+				const updatedAccounts = accounts.map(entry => {
+					if (!entry || typeof entry !== "object") return entry;
+					const stored = normalizeClaudeOauthEntryTokens(entry);
+					const matches = isClaudeOauthTokenMatch({
+						storedAccess: stored.access,
+						storedRefresh: stored.refresh,
+						previousAccess,
+						previousRefresh,
+						label: account.label,
+						storedLabel: entry?.label ?? null,
+					});
+					if (!matches) return entry;
+					updated = true;
+					const scopes = account.scopes ?? stored.scopes ?? null;
+					return updateClaudeOauthEntry({ ...entry }, { ...account, scopes });
+				});
+
+				if (updated) {
+					const nextPayload = isArray ? updatedAccounts : { ...parsed, accounts: updatedAccounts };
+					writeFileAtomic(path, JSON.stringify(nextPayload, null, 2) + "\n", { mode: 0o600 });
+					updatedPaths.push(path);
+				}
+			} catch (err) {
+				const message = err?.message ?? String(err);
+				errors.push(`Failed to update ${path}: ${message}`);
+			}
+		}
+	}
+
+	return { updatedPaths, errors };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Token refresh
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1275,13 +1498,16 @@ async function fetchClaudeOAuthUsage(accessToken) {
  * @returns {Promise<{ success: boolean, label: string, source: string, usage?: object, ... }>}
  */
 async function fetchClaudeOAuthUsageForAccount(account) {
-	// Check token expiry
-	if (account.expiresAt && account.expiresAt < Date.now()) {
+	const refreshed = await ensureFreshClaudeOAuthToken(account);
+	if (!refreshed) {
+		const message = account.refreshToken
+			? "OAuth token expired and refresh failed - run 'claude /login'"
+			: "OAuth token expired - refresh token missing, run 'claude /login'";
 		return {
 			success: false,
 			label: account.label,
 			source: account.source,
-			error: "OAuth token expired - run 'claude /login' to refresh",
+			error: message,
 			subscriptionType: account.subscriptionType,
 			rateLimitTier: account.rateLimitTier,
 		};
@@ -3385,6 +3611,39 @@ async function refreshClaudeToken(refreshToken) {
 	}
 }
 
+function isClaudeOauthTokenExpiring(expiresAt) {
+	if (!expiresAt) return false;
+	return expiresAt <= Date.now() + CLAUDE_OAUTH_REFRESH_BUFFER_MS;
+}
+
+/**
+ * Ensure a Claude OAuth access token is fresh, refreshing and persisting if needed.
+ * @param {{ label: string, accessToken: string, refreshToken?: string | null, expiresAt?: number | null, scopes?: string[] | null, source?: string }} account
+ * @returns {Promise<boolean>}
+ */
+async function ensureFreshClaudeOAuthToken(account) {
+	if (!isClaudeOauthTokenExpiring(account.expiresAt)) return true;
+	if (!account.refreshToken) return false;
+
+	const previousAccessToken = account.accessToken;
+	const previousRefreshToken = account.refreshToken;
+
+	try {
+		const refreshed = await refreshClaudeToken(account.refreshToken);
+		if (!refreshed?.accessToken) return false;
+		account.accessToken = refreshed.accessToken;
+		account.refreshToken = refreshed.refreshToken ?? account.refreshToken;
+		account.expiresAt = Date.now() + refreshed.expiresIn * 1000;
+		persistClaudeOAuthTokens(account, {
+			previousAccessToken,
+			previousRefreshToken,
+		});
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Run the Claude OAuth browser flow to get tokens
  * @param {{ noBrowser: boolean }} flags - CLI flags
@@ -5116,6 +5375,8 @@ export {
 	loadAllClaudeOAuthAccounts,
 	fetchClaudeOAuthUsage,
 	fetchClaudeOAuthUsageForAccount,
+	ensureFreshClaudeOAuthToken,
+	persistClaudeOAuthTokens,
 	
 	// OAuth PKCE utilities
 	generatePKCE,
