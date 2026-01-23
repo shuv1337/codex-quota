@@ -66,6 +66,13 @@ const CLAUDE_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_OAUTH_VERSION = "2023-06-01";
 const CLAUDE_OAUTH_BETA = "oauth-2025-04-20";
 
+// Claude OAuth browser flow configuration
+const CLAUDE_OAUTH_AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
+const CLAUDE_OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token";
+const CLAUDE_OAUTH_REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback";
+const CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const CLAUDE_OAUTH_SCOPES = "org:create_api_key user:profile user:inference";
+
 // CLI command names
 const PRIMARY_CMD = "codex-quota";
 const PACKAGE_JSON_PATH = join(dirname(import.meta.url.replace("file://", "")), "package.json");
@@ -341,8 +348,32 @@ function loadAccountFromCodexCli() {
 }
 
 /**
+ * Deduplicate accounts by email (from JWT token), keeping the first occurrence
+ * This handles the case where the same account is sourced from multiple files
+ * (e.g., codex-accounts.json and opencode both storing the same credentials)
+ * 
+ * Note: We use email instead of accountId because a team account has one accountId
+ * but multiple users (each with their own email). We want to show each user once.
+ * @param {Array<{access: string, ...}>} accounts - Array of accounts with JWT access tokens
+ * @returns {Array<{access: string, ...}>} Deduplicated accounts
+ */
+function deduplicateAccountsByEmail(accounts) {
+	const seen = new Set();
+	return accounts.filter(account => {
+		if (!account.access) return true; // Keep accounts without token (shouldn't happen)
+		const profile = extractProfile(account.access);
+		const email = profile?.email;
+		if (!email) return true; // Keep accounts without email (fallback)
+		if (seen.has(email)) return false;
+		seen.add(email);
+		return true;
+	});
+}
+
+/**
  * Load ALL accounts from ALL sources (env, file paths, codex-cli)
  * Each account includes a `source` property indicating its origin
+ * Deduplicates by email to prevent showing same user twice
  * @returns {Array<{label: string, accountId: string, access: string, refresh: string, expires?: number, source: string}>}
  */
 function loadAllAccounts() {
@@ -362,7 +393,8 @@ function loadAllAccounts() {
 		all.push(...loadAccountFromCodexCli());
 	}
 	
-	return all;
+	// 4. Deduplicate by email (same user from multiple sources)
+	return deduplicateAccountsByEmail(all);
 }
 
 /**
@@ -692,6 +724,10 @@ function normalizeClaudeAccount(raw, source) {
 	const cfClearance = raw.cfClearance ?? raw.cf_clearance ?? null;
 	const orgId = raw.orgId ?? raw.org_id ?? null;
 	const cookies = raw.cookies && typeof raw.cookies === "object" ? raw.cookies : null;
+	// OAuth flow metadata (optional, for accounts created via OAuth browser flow)
+	const oauthRefreshToken = raw.oauthRefreshToken ?? raw.oauth_refresh_token ?? null;
+	const oauthExpiresAt = raw.oauthExpiresAt ?? raw.oauth_expires_at ?? null;
+	const oauthScopes = raw.oauthScopes ?? raw.oauth_scopes ?? null;
 	return {
 		label,
 		sessionKey,
@@ -699,6 +735,9 @@ function normalizeClaudeAccount(raw, source) {
 		cfClearance,
 		orgId,
 		cookies,
+		oauthRefreshToken,
+		oauthExpiresAt,
+		oauthScopes,
 		source,
 	};
 }
@@ -907,12 +946,71 @@ function loadClaudeOAuthFromEnv() {
 }
 
 /**
+ * Deduplicate Claude OAuth accounts by refresh token
+ * This handles the case where the same Claude account is sourced from multiple files
+ * (e.g., claude-code and opencode both storing the same credentials)
+ * 
+ * We use refreshToken because:
+ * - Access tokens change on refresh, but refresh tokens stay constant
+ * - Two entries with same refresh token are the same underlying account
+ * @param {Array<{accessToken: string, refreshToken?: string, ...}>} accounts - Array of accounts
+ * @returns {Array<{accessToken: string, ...}>} Deduplicated accounts
+ */
+function deduplicateClaudeOAuthAccounts(accounts) {
+	const seenTokens = new Set();
+	return accounts.filter(account => {
+		if (!account.accessToken) return true; // Keep accounts without token (shouldn't happen)
+		// Use refresh token if available (stays constant), otherwise fall back to access token
+		const tokenKey = account.refreshToken 
+			? account.refreshToken.substring(0, 50)
+			: account.accessToken.substring(0, 50);
+		if (seenTokens.has(tokenKey)) return false;
+		seenTokens.add(tokenKey);
+		return true;
+	});
+}
+
+/**
+ * Deduplicate Claude usage results by comparing usage fingerprints
+ * This catches cases where the same account has different OAuth tokens
+ * (e.g., claude-code and opencode both logged into the same Claude account)
+ * 
+ * We consider two results identical if they have the same utilization values.
+ * Reset times are NOT included since they can differ by milliseconds between calls.
+ * 
+ * @param {Array<{usage: object, ...}>} results - Array of fetched usage results
+ * @returns {Array<{usage: object, ...}>} Deduplicated results
+ */
+function deduplicateClaudeResultsByUsage(results) {
+	const seen = new Set();
+	return results.filter(result => {
+		if (!result.success || !result.usage) return true; // Keep errors/failures
+		
+		// Create a fingerprint from utilization values only (not reset times)
+		const usage = result.usage;
+		const fiveHour = usage.five_hour?.utilization ?? "null";
+		const sevenDay = usage.seven_day?.utilization ?? "null";
+		const sevenDayOpus = usage.seven_day_opus?.utilization ?? "null";
+		const sevenDaySonnet = usage.seven_day_sonnet?.utilization ?? "null";
+		
+		// Fingerprint: all utilization values concatenated
+		// Same account will have identical utilization regardless of which OAuth token is used
+		const fingerprint = `${fiveHour}|${sevenDay}|${sevenDayOpus}|${sevenDaySonnet}`;
+		
+		if (seen.has(fingerprint)) return false;
+		seen.add(fingerprint);
+		return true;
+	});
+}
+
+/**
  * Load all Claude OAuth accounts from all sources
  * Sources (in priority order):
  *   1. CLAUDE_OAUTH_ACCOUNTS env var
  *   2. ~/.claude-accounts.json (accounts with oauthToken field)
  *   3. ~/.claude/.credentials.json (Claude Code)
  *   4. ~/.local/share/opencode/auth.json (OpenCode)
+ * Deduplicates by accessToken to prevent showing same account twice
  * @returns {Array<{ label: string, accessToken: string, refreshToken?: string, expiresAt?: number, subscriptionType?: string, rateLimitTier?: string, source: string }>}
  */
 function loadAllClaudeOAuthAccounts() {
@@ -936,6 +1034,10 @@ function loadAllClaudeOAuthAccounts() {
 				all.push({
 					label: account.label,
 					accessToken: account.oauthToken,
+					// Pass through new OAuth metadata fields (optional, may be null for legacy accounts)
+					refreshToken: account.oauthRefreshToken || null,
+					expiresAt: account.oauthExpiresAt || null,
+					scopes: account.oauthScopes || null,
 					source: account.source,
 				});
 			}
@@ -958,7 +1060,8 @@ function loadAllClaudeOAuthAccounts() {
 		}
 	}
 
-	return all;
+	// 5. Deduplicate by accessToken (same account from multiple sources with different labels)
+	return deduplicateClaudeOAuthAccounts(all);
 }
 
 /**
@@ -2086,7 +2189,7 @@ function buildClaudeUsageLines(payload) {
 }
 
 function printHelp() {
-	console.log(`${PRIMARY_CMD} - Manage and monitor OpenAI Codex accounts
+	console.log(`${PRIMARY_CMD} - Manage and monitor OpenAI Codex and Claude accounts
 Version: ${getPackageVersion()}
 
 Usage:
@@ -2104,12 +2207,15 @@ Options:
   --json            Output in JSON format
   --no-browser      Print auth URL instead of opening browser
   --no-color        Disable colored output
-  --claude          Include Claude Code usage (uses CLAUDE_ACCOUNTS or ~/.claude-accounts.json)
+  --codex           Show only Codex accounts (default: show both)
+  --claude          Show only Claude accounts (default: show both)
   --version, -v     Show version number
   --help, -h        Show this help
 
 Examples:
-  ${PRIMARY_CMD}                   Check quota for all accounts
+  ${PRIMARY_CMD}                   Check quota for all accounts (Codex + Claude)
+  ${PRIMARY_CMD} --codex           Check quota for Codex accounts only
+  ${PRIMARY_CMD} --claude          Check quota for Claude accounts only
   ${PRIMARY_CMD} personal          Check quota for "personal" account
   ${PRIMARY_CMD} add work          Add new account with label "work"
   ${PRIMARY_CMD} claude add work   Add a Claude credential with label "work"
@@ -2139,21 +2245,25 @@ Usage:
   ${PRIMARY_CMD} claude add [label] [options]
 
 Commands:
-  add [label]       Add a Claude credential interactively
+  add [label]       Add a Claude credential (via OAuth or manual entry)
 
 Options:
+  --oauth           Use OAuth browser authentication (recommended)
+  --manual          Use manual token entry
+  --no-browser      Print OAuth URL instead of opening browser
   --json            Output result in JSON format
   --help, -h        Show this help
 
 Examples:
-  ${PRIMARY_CMD} claude add                 Add Claude credential (prompt for label)
-  ${PRIMARY_CMD} claude add work            Add Claude credential with label "work"
-  ${PRIMARY_CMD} claude add work --json     JSON output for scripting
+  ${PRIMARY_CMD} claude add                     Add Claude credential (prompts for method)
+  ${PRIMARY_CMD} claude add work --oauth        Add via OAuth browser flow
+  ${PRIMARY_CMD} claude add work --manual       Add via manual token entry
+  ${PRIMARY_CMD} claude add work --json         JSON output for scripting
 `);
 }
 
 function printHelpClaudeAdd() {
-	console.log(`${PRIMARY_CMD} claude add - Add a Claude credential interactively
+	console.log(`${PRIMARY_CMD} claude add - Add a Claude credential
 
 Usage:
   ${PRIMARY_CMD} claude add [label] [options]
@@ -2162,16 +2272,32 @@ Arguments:
   label             Optional label for the Claude credential (e.g., "work", "personal")
 
 Options:
+  --oauth           Use OAuth browser authentication (recommended)
+                    Opens browser for secure authentication
+  --manual          Use manual token entry
+                    Paste sessionKey or OAuth token directly
+  --no-browser      Print OAuth URL instead of opening browser
+                    Use this in headless/SSH environments
   --json            Output result in JSON format
   --help, -h        Show this help
 
 Description:
-  Prompts for Claude session credentials and saves them to ~/.claude-accounts.json.
-  You can provide either a sessionKey or an OAuth token (one is required).
+  Adds a Claude credential to ~/.claude-accounts.json.
+  
+  OAuth flow (recommended):
+    1. Opens browser for authentication at claude.ai
+    2. User copies code#state from browser
+    3. Tool exchanges code for tokens automatically
+  
+  Manual flow:
+    Prompts for sessionKey or OAuth token (one is required).
 
 Examples:
-  ${PRIMARY_CMD} claude add
-  ${PRIMARY_CMD} claude add work
+  ${PRIMARY_CMD} claude add                       Interactive (prompts for method)
+  ${PRIMARY_CMD} claude add work --oauth          OAuth browser flow
+  ${PRIMARY_CMD} claude add work --manual         Manual token entry
+  ${PRIMARY_CMD} claude add work --oauth --no-browser  OAuth without opening browser
+  ${PRIMARY_CMD} claude add work --json           JSON output for scripting
 `);
 }
 
@@ -2254,7 +2380,7 @@ Usage:
 
 Options:
   --json            Output in JSON format
-  --claude          Include Claude Code usage (uses CLAUDE_ACCOUNTS or ~/.claude-accounts.json)
+  --claude          Include Claude accounts in listing
   --help, -h        Show this help
 
 Description:
@@ -2265,6 +2391,9 @@ Description:
   - Source file location
   - Active indicator (* for the current account in ~/.codex/auth.json)
   With --claude, also lists configured Claude accounts.
+
+  Accounts are deduplicated by ID to avoid showing duplicates
+  when the same account is stored in multiple files.
 
 Output columns:
   * = active        Currently active account
@@ -2277,6 +2406,7 @@ Output columns:
 Examples:
   ${PRIMARY_CMD} list                    Show all accounts
   ${PRIMARY_CMD} list --json             Get JSON output for scripting
+  ${PRIMARY_CMD} list --claude           Include Claude accounts
 `);
 }
 
@@ -2327,25 +2457,31 @@ Arguments:
 
 Options:
   --json            Output in JSON format
-  --claude          Include Claude Code usage (uses CLAUDE_ACCOUNTS or ~/.claude-accounts.json)
+  --codex           Show only Codex accounts (default: show both)
+  --claude          Show only Claude accounts (default: show both)
   --help, -h        Show this help
 
 Description:
-  Displays usage statistics for OpenAI Codex accounts:
+  Displays usage statistics for OpenAI Codex and Claude accounts:
   - Session usage (queries per session)
   - Weekly usage (queries per 7-day period)
   - Available credits
 
-  With --claude, also shows Claude Code subscription usage.
+  By default, shows both Codex and Claude accounts.
+  Use --codex or --claude to filter to a specific type.
+
+  Accounts are deduplicated by ID to avoid showing the same account
+  multiple times when sourced from different files.
 
   Tokens are automatically refreshed if expired.
 
 Examples:
-  ${PRIMARY_CMD}                         Check all accounts
+  ${PRIMARY_CMD}                         Check all accounts (Codex + Claude)
+  ${PRIMARY_CMD} --codex                 Check Codex accounts only
+  ${PRIMARY_CMD} --claude                Check Claude accounts only
   ${PRIMARY_CMD} personal                Check "personal" account only
   ${PRIMARY_CMD} quota --json            JSON output for all accounts
   ${PRIMARY_CMD} quota work --json       JSON output for "work" account
-  ${PRIMARY_CMD} --claude                Include Claude Code usage
 `);
 }
 
@@ -2818,6 +2954,212 @@ function startCallbackServer(expectedState) {
 			// Server is ready - caller will open browser
 		});
 	});
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Claude OAuth browser flow
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Build the Claude OAuth authorization URL with PKCE
+ * Claude uses a device code flow where users copy code#state from the browser
+ * @param {string} codeChallenge - PKCE code challenge (base64url-encoded SHA256)
+ * @param {string} state - Random state string for CSRF protection
+ * @returns {string} Complete authorization URL
+ */
+function buildClaudeAuthUrl(codeChallenge, state) {
+	const params = new URLSearchParams({
+		response_type: "code",
+		client_id: CLAUDE_OAUTH_CLIENT_ID,
+		redirect_uri: CLAUDE_OAUTH_REDIRECT_URI,
+		scope: CLAUDE_OAUTH_SCOPES,
+		code_challenge: codeChallenge,
+		code_challenge_method: "S256",
+		state: state,
+		code: "true", // Display code in browser for user to copy
+	});
+	// Use %20 instead of + for spaces
+	return `${CLAUDE_OAUTH_AUTHORIZE_URL}?${params.toString().replace(/\+/g, "%20")}`;
+}
+
+/**
+ * Parse user input containing Claude OAuth code and state
+ * Accepts formats:
+ *   - "code#state" (code with state suffix)
+ *   - "code" (code only, state validation skipped)
+ *   - Full callback URL: https://console.anthropic.com/oauth/code/callback?code=...&state=...
+ * @param {string} input - User input string
+ * @param {string} expectedState - Expected state for CSRF validation
+ * @returns {{ code: string, state: string | null }} Parsed code and optional state
+ */
+function parseClaudeCodeState(input) {
+	const trimmed = (input ?? "").trim();
+	if (!trimmed) {
+		return { code: null, state: null };
+	}
+
+	// Check if it's a full callback URL
+	if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+		try {
+			const url = new URL(trimmed);
+			const code = url.searchParams.get("code");
+			const state = url.searchParams.get("state");
+			return { code: code || null, state: state || null };
+		} catch {
+			return { code: null, state: null };
+		}
+	}
+
+	// Check for code#state format
+	if (trimmed.includes("#")) {
+		const [code, state] = trimmed.split("#", 2);
+		return { code: code || null, state: state || null };
+	}
+
+	// Plain code only
+	return { code: trimmed, state: null };
+}
+
+/**
+ * Exchange Claude authorization code for tokens
+ * @param {string} code - Authorization code from callback
+ * @param {string} codeVerifier - PKCE code verifier
+ * @param {string} state - OAuth state for CSRF validation
+ * @returns {Promise<{ accessToken: string, refreshToken: string, expiresIn: number }>}
+ */
+async function exchangeClaudeCodeForTokens(code, codeVerifier, state) {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), OAUTH_TIMEOUT_MS);
+
+	try {
+		const body = {
+			grant_type: "authorization_code",
+			code: code,
+			state: state,
+			redirect_uri: CLAUDE_OAUTH_REDIRECT_URI,
+			client_id: CLAUDE_OAUTH_CLIENT_ID,
+			code_verifier: codeVerifier,
+		};
+
+		const response = await fetch(CLAUDE_OAUTH_TOKEN_URL, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify(body),
+			signal: controller.signal,
+		});
+
+		if (!response.ok) {
+			const text = await response.text();
+			throw new Error(`Token exchange failed: ${response.status} ${text}`);
+		}
+
+		const data = await response.json();
+
+		return {
+			accessToken: data.access_token,
+			refreshToken: data.refresh_token || null,
+			expiresIn: data.expires_in || 3600,
+		};
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+/**
+ * Refresh a Claude OAuth token using the refresh token
+ * @param {string} refreshToken - The refresh token
+ * @returns {Promise<{ accessToken: string, refreshToken: string, expiresIn: number }>}
+ */
+async function refreshClaudeToken(refreshToken) {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), OAUTH_TIMEOUT_MS);
+
+	try {
+		const body = {
+			grant_type: "refresh_token",
+			refresh_token: refreshToken,
+			client_id: CLAUDE_OAUTH_CLIENT_ID,
+		};
+
+		const response = await fetch(CLAUDE_OAUTH_TOKEN_URL, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify(body),
+			signal: controller.signal,
+		});
+
+		if (!response.ok) {
+			const text = await response.text();
+			throw new Error(`Token refresh failed: ${response.status} ${text}`);
+		}
+
+		const data = await response.json();
+
+		return {
+			accessToken: data.access_token,
+			refreshToken: data.refresh_token || refreshToken,
+			expiresIn: data.expires_in || 3600,
+		};
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+/**
+ * Run the Claude OAuth browser flow to get tokens
+ * @param {{ noBrowser: boolean }} flags - CLI flags
+ * @returns {Promise<{ accessToken: string, refreshToken: string, expiresAt: number, scopes: string }>}
+ */
+async function handleClaudeOAuthFlow(flags) {
+	// 1. Generate PKCE code verifier and challenge
+	const { verifier, challenge } = generatePKCE();
+
+	// 2. Generate random state for CSRF protection
+	const state = generateState();
+
+	// 3. Build authorization URL
+	const authUrl = buildClaudeAuthUrl(challenge, state);
+
+	// 4. Print instructions
+	console.log("\nStarting Claude OAuth authentication...\n");
+
+	// 5. Open browser or print URL
+	openBrowser(authUrl, { noBrowser: flags.noBrowser });
+
+	// 6. Prompt user to paste code
+	console.log("After authenticating in the browser, you will see a code.");
+	console.log("Copy the entire code (including any #state portion) and paste it below.\n");
+
+	const input = await promptInput("Paste code#state here: ");
+	const { code, state: returnedState } = parseClaudeCodeState(input);
+
+	if (!code) {
+		throw new Error("No authorization code provided. Authentication cancelled.");
+	}
+
+	// 7. Validate state if provided (CSRF protection)
+	if (returnedState && returnedState !== state) {
+		throw new Error("State mismatch. Possible CSRF attack. Please try again.");
+	}
+
+	// 8. Exchange code for tokens
+	console.log("\nExchanging code for tokens...");
+	const stateToSend = returnedState ?? state;
+	const tokens = await exchangeClaudeCodeForTokens(code, verifier, stateToSend);
+
+	// 9. Calculate expiry timestamp
+	const expiresAt = Date.now() + (tokens.expiresIn * 1000);
+
+	return {
+		accessToken: tokens.accessToken,
+		refreshToken: tokens.refreshToken,
+		expiresAt: expiresAt,
+		scopes: CLAUDE_OAUTH_SCOPES,
+	};
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3661,15 +4003,24 @@ async function handleRemove(args, flags) {
 
 /**
  * Handle Claude add subcommand - add a Claude credential interactively
+ * Supports two authentication methods:
+ *   - OAuth browser flow (--oauth): Opens browser for authentication
+ *   - Manual entry (--manual): Paste sessionKey/token directly
  * @param {string[]} args - Non-flag arguments (optional label)
- * @param {{ json: boolean }} flags - Parsed flags
+ * @param {{ json: boolean, noBrowser: boolean, oauth: boolean, manual: boolean }} flags - Parsed flags
  */
 async function handleClaudeAdd(args, flags) {
 	let label = args[0] || null;
 	try {
+		// Check for conflicting flags
+		if (flags.oauth && flags.manual) {
+			throw new Error("Cannot use both --oauth and --manual flags. Choose one authentication method.");
+		}
+
 		const existingAccounts = loadClaudeAccounts();
 		const existingLabels = new Set(existingAccounts.map(a => a.label));
 
+		// Prompt for label if not provided
 		if (!label) {
 			label = (await promptInput("Label (e.g., work, personal): ")).trim();
 		}
@@ -3683,42 +4034,74 @@ async function handleClaudeAdd(args, flags) {
 			throw new Error(`Label "${label}" already exists. Choose a different label.`);
 		}
 
-		console.log("Paste your Claude sessionKey or OAuth token.");
-		const sessionKeyInput = await promptInput("sessionKey (sk-ant-...): ", { allowEmpty: true });
-		const oauthTokenInput = await promptInput("oauthToken (optional): ", { allowEmpty: true });
-		const cfClearanceInput = await promptInput("cfClearance (optional): ", { allowEmpty: true });
-		const orgIdInput = await promptInput("orgId (optional): ", { allowEmpty: true });
+		// Determine authentication method
+		let useOAuth = flags.oauth;
+		if (!flags.oauth && !flags.manual) {
+			// Prompt for choice
+			console.log("\nChoose authentication method:");
+			console.log("  [1] OAuth (recommended) - Authenticate via browser");
+			console.log("  [2] Manual - Paste sessionKey/token directly\n");
+			const choice = (await promptInput("Enter choice (1 or 2): ")).trim();
+			useOAuth = choice === "1";
+		}
 
-		let parsedInput = null;
-		if (sessionKeyInput && sessionKeyInput.trim().startsWith("{")) {
-			try {
-				parsedInput = JSON.parse(sessionKeyInput);
-			} catch {
-				parsedInput = null;
+		let newAccount;
+		let viaMethod;
+
+		if (useOAuth) {
+			// OAuth browser flow
+			const tokens = await handleClaudeOAuthFlow({ noBrowser: flags.noBrowser });
+			newAccount = {
+				label,
+				sessionKey: null,
+				oauthToken: tokens.accessToken,
+				oauthRefreshToken: tokens.refreshToken,
+				oauthExpiresAt: tokens.expiresAt,
+				oauthScopes: tokens.scopes,
+				cfClearance: null,
+				orgId: null,
+			};
+			viaMethod = "via OAuth";
+		} else {
+			// Manual entry flow
+			console.log("\nPaste your Claude sessionKey or OAuth token.");
+			const sessionKeyInput = await promptInput("sessionKey (sk-ant-...): ", { allowEmpty: true });
+			const oauthTokenInput = await promptInput("oauthToken (optional): ", { allowEmpty: true });
+			const cfClearanceInput = await promptInput("cfClearance (optional): ", { allowEmpty: true });
+			const orgIdInput = await promptInput("orgId (optional): ", { allowEmpty: true });
+
+			let parsedInput = null;
+			if (sessionKeyInput && sessionKeyInput.trim().startsWith("{")) {
+				try {
+					parsedInput = JSON.parse(sessionKeyInput);
+				} catch {
+					parsedInput = null;
+				}
 			}
+
+			const sessionKey = findClaudeSessionKey(parsedInput ?? sessionKeyInput) ?? null;
+			const oauthToken = oauthTokenInput?.trim()
+				|| parsedInput?.claudeAiOauth?.accessToken
+				|| parsedInput?.claude_ai_oauth?.accessToken
+				|| parsedInput?.accessToken
+				|| parsedInput?.access_token
+				|| null;
+			const cfClearance = cfClearanceInput?.trim() || null;
+			const orgId = orgIdInput?.trim() || null;
+
+			if (!sessionKey && !oauthToken) {
+				throw new Error("Provide at least a sessionKey or an OAuth token.");
+			}
+
+			newAccount = {
+				label,
+				sessionKey,
+				oauthToken,
+				cfClearance,
+				orgId,
+			};
+			viaMethod = "";
 		}
-
-		const sessionKey = findClaudeSessionKey(parsedInput ?? sessionKeyInput) ?? null;
-		const oauthToken = oauthTokenInput?.trim()
-			|| parsedInput?.claudeAiOauth?.accessToken
-			|| parsedInput?.claude_ai_oauth?.accessToken
-			|| parsedInput?.accessToken
-			|| parsedInput?.access_token
-			|| null;
-		const cfClearance = cfClearanceInput?.trim() || null;
-		const orgId = orgIdInput?.trim() || null;
-
-		if (!sessionKey && !oauthToken) {
-			throw new Error("Provide at least a sessionKey or an OAuth token.");
-		}
-
-		const newAccount = {
-			label,
-			sessionKey,
-			oauthToken,
-			cfClearance,
-			orgId,
-		};
 
 		const accounts = [...existingAccounts, newAccount];
 		const targetPath = saveClaudeAccounts(accounts);
@@ -3727,13 +4110,15 @@ async function handleClaudeAdd(args, flags) {
 			console.log(JSON.stringify({
 				success: true,
 				label,
+				method: useOAuth ? "oauth" : "manual",
 				source: targetPath,
 			}, null, 2));
 			return;
 		}
 
+		const credentialText = viaMethod ? `Added Claude credential ${label} (${viaMethod})` : `Added Claude credential ${label}`;
 		const lines = [
-			colorize(`Added Claude credential ${label}`, GREEN),
+			colorize(credentialText, GREEN),
 			"",
 			`Saved to: ${shortenPath(targetPath)}`,
 			"",
@@ -3779,20 +4164,33 @@ async function handleClaude(args, flags) {
 
 /**
  * Handle quota subcommand (default behavior)
+ * By default, shows both Codex and Claude accounts
+ * Use --codex to show only Codex accounts
+ * Use --claude to show only Claude accounts
  * @param {string[]} args - Non-flag arguments (e.g., label filter)
- * @param {{ json: boolean, claude?: boolean }} flags - Parsed flags
+ * @param {{ json: boolean, claude?: boolean, codex?: boolean }} flags - Parsed flags
  */
 async function handleQuota(args, flags) {
 	const labelFilter = args[0];
-	const includeClaude = Boolean(flags.claude);
-	const allAccounts = loadAccounts();
+	
+	// Determine which account types to show:
+	// - If neither --codex nor --claude specified: show both (default)
+	// - If --codex specified: show only Codex
+	// - If --claude specified: show only Claude
+	// - If both specified: show both (explicit)
+	const showCodex = !flags.claude || flags.codex;
+	const showClaude = !flags.codex || flags.claude;
+	
+	// Use loadAllAccounts() which includes deduplication by accountId
+	const allAccounts = showCodex ? loadAllAccounts() : [];
 	const hasOpenAiAccounts = allAccounts.length > 0;
 
-	if (!hasOpenAiAccounts && !includeClaude) {
+	// Check if we have any accounts to show
+	if (!hasOpenAiAccounts && !showClaude) {
 		if (flags.json) {
 			console.log(JSON.stringify({ 
 				success: false, 
-				error: "No accounts found",
+				error: "No Codex accounts found",
 				searchedLocations: [
 					"CODEX_ACCOUNTS env var",
 					...MULTI_ACCOUNT_PATHS,
@@ -3800,47 +4198,35 @@ async function handleQuota(args, flags) {
 				],
 			}, null, 2));
 		} else {
-			console.error(colorize("No accounts found.", RED));
+			console.error(colorize("No Codex accounts found.", RED));
 			console.error("\nSearched:");
 			console.error("  - CODEX_ACCOUNTS env var");
 			for (const p of MULTI_ACCOUNT_PATHS) {
 				console.error(`  - ${p}`);
 			}
 			console.error(`  - ${getCodexCliAuthPath()}`);
-			console.error("\nRun 'codex-quota.js --help' for account format.");
+			console.error("\nRun 'codex-quota add' to add an account.");
 		}
 		process.exit(1);
 	}
 
 	let accounts = [];
-	if (hasOpenAiAccounts) {
+	if (hasOpenAiAccounts && showCodex) {
 		accounts = labelFilter 
 			? allAccounts.filter(a => a.label === labelFilter)
 			: allAccounts;
 	}
 
-	if (labelFilter && !accounts.length) {
-		if (hasOpenAiAccounts) {
-			if (flags.json) {
-				console.log(JSON.stringify({ 
-					success: false, 
-					error: `Account "${labelFilter}" not found`,
-					availableLabels: allAccounts.map(a => a.label),
-				}, null, 2));
-			} else {
-				console.error(colorize(`Account "${labelFilter}" not found.`, RED));
-				console.error("Available:", allAccounts.map(a => a.label).join(", "));
-			}
+	if (labelFilter && showCodex && !accounts.length && hasOpenAiAccounts) {
+		if (flags.json) {
+			console.log(JSON.stringify({ 
+				success: false, 
+				error: `Account "${labelFilter}" not found`,
+				availableLabels: allAccounts.map(a => a.label),
+			}, null, 2));
 		} else {
-			if (flags.json) {
-				console.log(JSON.stringify({ 
-					success: false, 
-					error: `No OpenAI accounts found for "${labelFilter}"`,
-				}, null, 2));
-			} else {
-				console.error(colorize(`No OpenAI accounts found for "${labelFilter}".`, RED));
-				console.error("Add an account with 'codex-quota add' or omit the label.");
-			}
+			console.error(colorize(`Account "${labelFilter}" not found.`, RED));
+			console.error("Available:", allAccounts.map(a => a.label).join(", "));
 		}
 		process.exit(1);
 	}
@@ -3858,25 +4244,50 @@ async function handleQuota(args, flags) {
 	}
 
 	let claudeResults = null;
-	if (includeClaude) {
+	if (showClaude) {
 		// Try OAuth accounts first (preferred - uses official API)
 		const oauthAccounts = loadAllClaudeOAuthAccounts();
 		if (oauthAccounts.length) {
-			claudeResults = await Promise.all(
+			const rawResults = await Promise.all(
 				oauthAccounts.map(account => fetchClaudeOAuthUsageForAccount(account))
 			);
+			// Deduplicate by usage fingerprint (same account from different sources has identical usage)
+			claudeResults = deduplicateClaudeResultsByUsage(rawResults);
 		} else {
 			// Fall back to legacy cookie-based accounts
 			const claudeAccounts = loadClaudeAccounts();
 			if (claudeAccounts.length) {
-				claudeResults = await Promise.all(
+				const rawResults = await Promise.all(
 					claudeAccounts.map(account => fetchClaudeUsageForCredentials(account))
 				);
+				claudeResults = deduplicateClaudeResultsByUsage(rawResults);
 			} else {
 				// Last resort: try to find any session credentials
-				claudeResults = [await fetchClaudeUsage()];
+				const legacyResult = await fetchClaudeUsage();
+				// Only include if it has meaningful data
+				if (legacyResult.success || legacyResult.usage) {
+					claudeResults = [legacyResult];
+				}
 			}
 		}
+	}
+
+	// Check if we have anything to show
+	const hasCodexResults = results.length > 0;
+	const hasClaudeResults = claudeResults && claudeResults.length > 0;
+	
+	if (!hasCodexResults && !hasClaudeResults) {
+		if (flags.json) {
+			console.log(JSON.stringify({ 
+				success: false, 
+				error: "No accounts found",
+			}, null, 2));
+		} else {
+			console.error(colorize("No accounts found.", RED));
+			console.error("\nRun 'codex-quota add' to add a Codex account.");
+			console.error("Run 'codex-quota claude add' to add a Claude account.");
+		}
+		process.exit(1);
 	}
 
 	if (flags.json) {
@@ -3891,14 +4302,17 @@ async function handleQuota(args, flags) {
 				source: account.source,
 			};
 		});
-		if (includeClaude) {
+		// Always output both fields when showing both, or just the relevant one
+		if (showCodex && showClaude) {
 			console.log(JSON.stringify({
-				openai: openaiOutput,
-				claude: claudeResults,
+				codex: openaiOutput,
+				claude: claudeResults ?? [],
 			}, null, 2));
-			return;
+		} else if (showClaude) {
+			console.log(JSON.stringify(claudeResults ?? [], null, 2));
+		} else {
+			console.log(JSON.stringify(openaiOutput, null, 2));
 		}
-		console.log(JSON.stringify(openaiOutput, null, 2));
 		return;
 	}
 
@@ -3908,7 +4322,7 @@ async function handleQuota(args, flags) {
 		console.log(boxLines.join("\n"));
 	}
 
-	if (includeClaude && claudeResults) {
+	if (claudeResults) {
 		for (const result of claudeResults) {
 			const lines = buildClaudeUsageLines(result);
 			const boxLines = drawBox(lines);
@@ -3930,6 +4344,9 @@ async function main() {
 		noBrowser: args.includes("--no-browser"),
 		noColor: args.includes("--no-color"),
 		claude: args.includes("--claude"),
+		codex: args.includes("--codex"),
+		oauth: args.includes("--oauth"),
+		manual: args.includes("--manual"),
 	};
 	
 	// Set global noColorFlag for supportsColor() function
@@ -4052,6 +4469,10 @@ export {
 	loadClaudeAccounts,
 	isValidClaudeAccount,
 	
+	// Deduplication functions
+	deduplicateAccountsByEmail,
+	deduplicateClaudeOAuthAccounts,
+	
 	// Claude OAuth functions
 	loadClaudeOAuthFromClaudeCode,
 	loadClaudeOAuthFromOpenCode,
@@ -4069,6 +4490,13 @@ export {
 	openBrowser,
 	startCallbackServer,
 	exchangeCodeForTokens,
+	
+	// Claude OAuth browser flow
+	buildClaudeAuthUrl,
+	parseClaudeCodeState,
+	exchangeClaudeCodeForTokens,
+	refreshClaudeToken,
+	handleClaudeOAuthFlow,
 	
 	// JWT utilities
 	decodeJWT,

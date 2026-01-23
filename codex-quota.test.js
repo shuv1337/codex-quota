@@ -28,6 +28,9 @@ import {
 	loadClaudeAccountsFromEnv,
 	loadClaudeAccountsFromFile,
 	isValidClaudeAccount,
+	// Deduplication functions
+	deduplicateAccountsByEmail,
+	deduplicateClaudeOAuthAccounts,
 	// Claude OAuth functions
 	loadClaudeOAuthFromClaudeCode,
 	loadClaudeOAuthFromOpenCode,
@@ -35,6 +38,7 @@ import {
 	loadAllClaudeOAuthAccounts,
 	fetchClaudeOAuthUsage,
 	fetchClaudeOAuthUsageForAccount,
+	// OpenAI OAuth utilities
 	generatePKCE,
 	generateState,
 	buildAuthUrl,
@@ -43,6 +47,13 @@ import {
 	openBrowser,
 	startCallbackServer,
 	exchangeCodeForTokens,
+	// Claude OAuth browser flow
+	buildClaudeAuthUrl,
+	parseClaudeCodeState,
+	exchangeClaudeCodeForTokens,
+	refreshClaudeToken,
+	handleClaudeOAuthFlow,
+	// JWT utilities
 	decodeJWT,
 	extractAccountId,
 	getActiveAccountId,
@@ -881,6 +892,140 @@ describe("fetchClaudeOAuthUsageForAccount", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Deduplication tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Helper to create a fake JWT with a specific email in the profile claim
+function createFakeJwtWithEmail(email) {
+	const header = { alg: "RS256", typ: "JWT" };
+	const payload = {
+		"https://api.openai.com/profile": { email },
+		exp: Math.floor(Date.now() / 1000) + 3600,
+	};
+	const encode = (obj) => Buffer.from(JSON.stringify(obj)).toString("base64url");
+	return `${encode(header)}.${encode(payload)}.fake-signature`;
+}
+
+describe("deduplicateAccountsByEmail", () => {
+	test("removes duplicate accounts with same email", () => {
+		const accounts = [
+			{ label: "account1", access: createFakeJwtWithEmail("user1@example.com"), source: "file1" },
+			{ label: "account2", access: createFakeJwtWithEmail("user1@example.com"), source: "file2" },
+			{ label: "account3", access: createFakeJwtWithEmail("user2@example.com"), source: "file3" },
+		];
+		const result = deduplicateAccountsByEmail(accounts);
+		expect(result.length).toBe(2);
+		expect(result[0].label).toBe("account1");
+		expect(result[1].label).toBe("account3");
+	});
+
+	test("keeps first occurrence when duplicates exist", () => {
+		const accounts = [
+			{ label: "first", access: createFakeJwtWithEmail("same@example.com"), source: "source1" },
+			{ label: "second", access: createFakeJwtWithEmail("same@example.com"), source: "source2" },
+			{ label: "third", access: createFakeJwtWithEmail("same@example.com"), source: "source3" },
+		];
+		const result = deduplicateAccountsByEmail(accounts);
+		expect(result.length).toBe(1);
+		expect(result[0].label).toBe("first");
+		expect(result[0].source).toBe("source1");
+	});
+
+	test("returns all accounts when emails are different", () => {
+		const accounts = [
+			{ label: "a", access: createFakeJwtWithEmail("a@example.com"), source: "s1" },
+			{ label: "b", access: createFakeJwtWithEmail("b@example.com"), source: "s2" },
+			{ label: "c", access: createFakeJwtWithEmail("c@example.com"), source: "s3" },
+		];
+		const result = deduplicateAccountsByEmail(accounts);
+		expect(result.length).toBe(3);
+	});
+
+	test("handles empty array", () => {
+		const result = deduplicateAccountsByEmail([]);
+		expect(result).toEqual([]);
+	});
+
+	test("keeps accounts without access token", () => {
+		const accounts = [
+			{ label: "no-token", source: "s1" },
+			{ label: "has-token", access: createFakeJwtWithEmail("user@example.com"), source: "s2" },
+		];
+		const result = deduplicateAccountsByEmail(accounts);
+		expect(result.length).toBe(2);
+	});
+
+	test("keeps accounts with invalid JWT (no email extractable)", () => {
+		const accounts = [
+			{ label: "invalid-jwt", access: "not-a-valid-jwt", source: "s1" },
+			{ label: "valid-jwt", access: createFakeJwtWithEmail("user@example.com"), source: "s2" },
+		];
+		const result = deduplicateAccountsByEmail(accounts);
+		expect(result.length).toBe(2);
+	});
+});
+
+describe("deduplicateClaudeOAuthAccounts", () => {
+	test("removes duplicate accounts with same refreshToken", () => {
+		const accounts = [
+			{ label: "claude1", accessToken: "sk-ant-oat-abc", refreshToken: "sk-ant-ort-same", source: "file1" },
+			{ label: "claude2", accessToken: "sk-ant-oat-def", refreshToken: "sk-ant-ort-same", source: "file2" },
+			{ label: "claude3", accessToken: "sk-ant-oat-ghi", refreshToken: "sk-ant-ort-different", source: "file3" },
+		];
+		const result = deduplicateClaudeOAuthAccounts(accounts);
+		expect(result.length).toBe(2);
+		expect(result[0].label).toBe("claude1");
+		expect(result[1].label).toBe("claude3");
+	});
+
+	test("keeps first occurrence when duplicates exist", () => {
+		const refresh = "sk-ant-ort-same-" + "x".repeat(50);
+		const accounts = [
+			{ label: "first", accessToken: "sk-ant-oat-1", refreshToken: refresh, source: "source1" },
+			{ label: "second", accessToken: "sk-ant-oat-2", refreshToken: refresh, source: "source2" },
+		];
+		const result = deduplicateClaudeOAuthAccounts(accounts);
+		expect(result.length).toBe(1);
+		expect(result[0].label).toBe("first");
+	});
+
+	test("returns all accounts when refresh tokens are different", () => {
+		const accounts = [
+			{ label: "a", accessToken: "sk-ant-oat-1", refreshToken: "sk-ant-ort-1-unique", source: "s1" },
+			{ label: "b", accessToken: "sk-ant-oat-2", refreshToken: "sk-ant-ort-2-unique", source: "s2" },
+		];
+		const result = deduplicateClaudeOAuthAccounts(accounts);
+		expect(result.length).toBe(2);
+	});
+
+	test("falls back to accessToken when no refreshToken", () => {
+		const accounts = [
+			{ label: "claude1", accessToken: "sk-ant-oat-same-token", source: "file1" },
+			{ label: "claude2", accessToken: "sk-ant-oat-same-token", source: "file2" },
+			{ label: "claude3", accessToken: "sk-ant-oat-different", source: "file3" },
+		];
+		const result = deduplicateClaudeOAuthAccounts(accounts);
+		expect(result.length).toBe(2);
+		expect(result[0].label).toBe("claude1");
+		expect(result[1].label).toBe("claude3");
+	});
+
+	test("handles empty array", () => {
+		const result = deduplicateClaudeOAuthAccounts([]);
+		expect(result).toEqual([]);
+	});
+
+	test("keeps accounts without accessToken", () => {
+		const accounts = [
+			{ label: "no-token", source: "s1" },
+			{ label: "has-token", accessToken: "sk-ant-valid-token", source: "s2" },
+		];
+		const result = deduplicateClaudeOAuthAccounts(accounts);
+		expect(result.length).toBe(2);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // generatePKCE tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1411,9 +1556,10 @@ describe("getAllLabels", () => {
 	});
 
 	test("returns array of labels from env accounts", () => {
+		// Use different emails so they aren't deduplicated
 		const mockAccounts = [
-			{ label: "work", accountId: MOCK_ACCOUNT_ID, access: MOCK_ACCESS_TOKEN, refresh: MOCK_REFRESH_TOKEN },
-			{ label: "personal", accountId: "acc_67890", access: MOCK_ACCESS_TOKEN, refresh: MOCK_REFRESH_TOKEN },
+			{ label: "work", accountId: MOCK_ACCOUNT_ID, access: createMockAccessToken(MOCK_ACCOUNT_ID, "work@example.com"), refresh: MOCK_REFRESH_TOKEN },
+			{ label: "personal", accountId: "acc_67890", access: createMockAccessToken("acc_67890", "personal@example.com"), refresh: MOCK_REFRESH_TOKEN },
 		];
 		process.env.CODEX_ACCOUNTS = JSON.stringify(mockAccounts);
 		
@@ -1422,16 +1568,19 @@ describe("getAllLabels", () => {
 		expect(labels).toContain("personal");
 	});
 
-	test("returns unique labels (deduplicates)", () => {
+	test("returns unique labels (deduplicates by email)", () => {
+		// Same email means they get deduplicated, even with different accountIds
 		const mockAccounts = [
-			{ label: "duplicate", accountId: MOCK_ACCOUNT_ID, access: MOCK_ACCESS_TOKEN, refresh: MOCK_REFRESH_TOKEN },
-			{ label: "duplicate", accountId: "acc_67890", access: MOCK_ACCESS_TOKEN, refresh: MOCK_REFRESH_TOKEN },
+			{ label: "dedup-test-1", accountId: MOCK_ACCOUNT_ID, access: createMockAccessToken(MOCK_ACCOUNT_ID, "dedup-same@example.com"), refresh: MOCK_REFRESH_TOKEN },
+			{ label: "dedup-test-2", accountId: "acc_67890", access: createMockAccessToken("acc_67890", "dedup-same@example.com"), refresh: MOCK_REFRESH_TOKEN },
 		];
 		process.env.CODEX_ACCOUNTS = JSON.stringify(mockAccounts);
 		
 		const labels = getAllLabels();
-		const duplicateCount = labels.filter(l => l === "duplicate").length;
-		expect(duplicateCount).toBe(1);
+		// Only first account kept (by email), so "dedup-test-1" should be present
+		// but "dedup-test-2" should be deduplicated away
+		expect(labels).toContain("dedup-test-1");
+		expect(labels).not.toContain("dedup-test-2");
 	});
 });
 
@@ -2226,5 +2375,108 @@ describe("handleRemove", () => {
 		const output = JSON.parse(jsonEntry);
 		expect(output.success).toBe(false);
 		expect(output.error).toContain("Cannot remove account from CODEX_ACCOUNTS env var");
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Claude OAuth browser flow tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("buildClaudeAuthUrl", () => {
+	test("builds URL with correct base and required parameters", () => {
+		const codeChallenge = "test_challenge_abc123";
+		const state = "test_state_xyz789";
+		const url = buildClaudeAuthUrl(codeChallenge, state);
+		
+		expect(url).toContain("https://claude.ai/oauth/authorize");
+		expect(url).toContain("response_type=code");
+		expect(url).toContain("client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e");
+		expect(url).toContain("redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback");
+		expect(url).toContain("code_challenge=" + codeChallenge);
+		expect(url).toContain("code_challenge_method=S256");
+		expect(url).toContain("state=" + state);
+		expect(url).toContain("code=true");
+	});
+
+	test("includes scopes with %20 encoding for spaces", () => {
+		const url = buildClaudeAuthUrl("challenge", "state");
+		expect(url).toContain("scope=org%3Acreate_api_key%20user%3Aprofile%20user%3Ainference");
+	});
+
+	test("works with PKCE values from generatePKCE", () => {
+		const { verifier, challenge } = generatePKCE();
+		const state = generateState();
+		const url = buildClaudeAuthUrl(challenge, state);
+		
+		expect(url).toContain(challenge);
+		expect(url).toContain(state);
+		// Verify URL is parseable
+		expect(() => new URL(url)).not.toThrow();
+	});
+});
+
+describe("parseClaudeCodeState", () => {
+	test("parses code#state format", () => {
+		const result = parseClaudeCodeState("abc123#xyz789");
+		expect(result.code).toBe("abc123");
+		expect(result.state).toBe("xyz789");
+	});
+
+	test("parses code only (no state)", () => {
+		const result = parseClaudeCodeState("abc123");
+		expect(result.code).toBe("abc123");
+		expect(result.state).toBeNull();
+	});
+
+	test("parses full callback URL", () => {
+		const result = parseClaudeCodeState(
+			"https://console.anthropic.com/oauth/code/callback?code=abc123&state=xyz789"
+		);
+		expect(result.code).toBe("abc123");
+		expect(result.state).toBe("xyz789");
+	});
+
+	test("parses callback URL without state parameter", () => {
+		const result = parseClaudeCodeState(
+			"https://console.anthropic.com/oauth/code/callback?code=abc123"
+		);
+		expect(result.code).toBe("abc123");
+		expect(result.state).toBeNull();
+	});
+
+	test("returns null for empty input", () => {
+		const result = parseClaudeCodeState("");
+		expect(result.code).toBeNull();
+		expect(result.state).toBeNull();
+	});
+
+	test("returns null for null input", () => {
+		const result = parseClaudeCodeState(null);
+		expect(result.code).toBeNull();
+		expect(result.state).toBeNull();
+	});
+
+	test("returns null for undefined input", () => {
+		const result = parseClaudeCodeState(undefined);
+		expect(result.code).toBeNull();
+		expect(result.state).toBeNull();
+	});
+
+	test("trims whitespace from input", () => {
+		const result = parseClaudeCodeState("  abc123#xyz789  ");
+		expect(result.code).toBe("abc123");
+		expect(result.state).toBe("xyz789");
+	});
+
+	test("handles code with empty state after # (treats empty as null)", () => {
+		const result = parseClaudeCodeState("abc123#");
+		expect(result.code).toBe("abc123");
+		expect(result.state).toBeNull();
+	});
+
+	test("returns null for invalid URL", () => {
+		const result = parseClaudeCodeState("http://invalid url with spaces");
+		expect(result.code).toBeNull();
+		expect(result.state).toBeNull();
 	});
 });
