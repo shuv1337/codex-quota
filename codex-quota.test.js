@@ -25,6 +25,16 @@ import {
 	findAccountByLabel,
 	getAllLabels,
 	isValidAccount,
+	loadClaudeAccountsFromEnv,
+	loadClaudeAccountsFromFile,
+	isValidClaudeAccount,
+	// Claude OAuth functions
+	loadClaudeOAuthFromClaudeCode,
+	loadClaudeOAuthFromOpenCode,
+	loadClaudeOAuthFromEnv,
+	loadAllClaudeOAuthAccounts,
+	fetchClaudeOAuthUsage,
+	fetchClaudeOAuthUsageForAccount,
 	generatePKCE,
 	generateState,
 	buildAuthUrl,
@@ -360,6 +370,42 @@ describe("isValidAccount", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Claude account validation tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("isValidClaudeAccount", () => {
+	test("returns truthy for valid account with sessionKey", () => {
+		const account = {
+			label: "claude",
+			sessionKey: "sk-ant-oat-123",
+		};
+		expect(isValidClaudeAccount(account)).toBeTruthy();
+	});
+
+	test("returns truthy for valid account with oauthToken", () => {
+		const account = {
+			label: "claude",
+			oauthToken: "oauth-token",
+		};
+		expect(isValidClaudeAccount(account)).toBeTruthy();
+	});
+
+	test("returns falsy for account missing label", () => {
+		const account = {
+			sessionKey: "sk-ant-oat-123",
+		};
+		expect(isValidClaudeAccount(account)).toBeFalsy();
+	});
+
+	test("returns falsy for account missing tokens", () => {
+		const account = {
+			label: "claude",
+		};
+		expect(isValidClaudeAccount(account)).toBeFalsy();
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // loadAccountsFromEnv tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -430,6 +476,76 @@ describe("loadAccountsFromEnv", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// loadClaudeAccountsFromEnv tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("loadClaudeAccountsFromEnv", () => {
+	let originalEnv;
+
+	beforeEach(() => {
+		originalEnv = process.env.CLAUDE_ACCOUNTS;
+	});
+
+	afterEach(() => {
+		if (originalEnv === undefined) {
+			delete process.env.CLAUDE_ACCOUNTS;
+		} else {
+			process.env.CLAUDE_ACCOUNTS = originalEnv;
+		}
+	});
+
+	test("returns empty array when CLAUDE_ACCOUNTS not set", () => {
+		delete process.env.CLAUDE_ACCOUNTS;
+		const accounts = loadClaudeAccountsFromEnv();
+		expect(accounts).toEqual([]);
+	});
+
+	test("returns accounts from JSON array format", () => {
+		const mockAccounts = [
+			{ label: "claude-env", sessionKey: "sk-ant-oat-123" },
+		];
+		process.env.CLAUDE_ACCOUNTS = JSON.stringify(mockAccounts);
+
+		const accounts = loadClaudeAccountsFromEnv();
+		expect(accounts.length).toBe(1);
+		expect(accounts[0].label).toBe("claude-env");
+		expect(accounts[0].source).toBe("env");
+	});
+
+	test("returns accounts from {accounts: [...]} format", () => {
+		const mockData = {
+			accounts: [
+				{ label: "claude-env-2", oauthToken: "oauth-token" },
+			],
+		};
+		process.env.CLAUDE_ACCOUNTS = JSON.stringify(mockData);
+
+		const accounts = loadClaudeAccountsFromEnv();
+		expect(accounts.length).toBe(1);
+		expect(accounts[0].label).toBe("claude-env-2");
+		expect(accounts[0].source).toBe("env");
+	});
+
+	test("returns empty array for invalid JSON", () => {
+		process.env.CLAUDE_ACCOUNTS = "not valid json {";
+		const accounts = loadClaudeAccountsFromEnv();
+		expect(accounts).toEqual([]);
+	});
+
+	test("filters out invalid accounts", () => {
+		const mockAccounts = [
+			{ label: "valid", sessionKey: "sk-ant-oat-123" },
+			{ label: "invalid-no-auth" },
+		];
+		process.env.CLAUDE_ACCOUNTS = JSON.stringify(mockAccounts);
+
+		const accounts = loadClaudeAccountsFromEnv();
+		expect(accounts.length).toBe(1);
+		expect(accounts[0].label).toBe("valid");
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // loadAccountsFromFile tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -491,6 +607,276 @@ describe("loadAccountsFromFile", () => {
 		const accounts = loadAccountsFromFile(testFile);
 		expect(accounts[0].expires).toBe(123456);
 		expect(accounts[0].customField).toBe("preserved");
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// loadClaudeAccountsFromFile tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("loadClaudeAccountsFromFile", () => {
+	const testDir = join(tmpdir(), "codex-quota-claude-test-" + Date.now());
+	const testFile = join(testDir, "claude-accounts.json");
+
+	beforeEach(() => {
+		mkdirSync(testDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		rmSync(testDir, { recursive: true, force: true });
+	});
+
+	test("returns empty array for non-existent file", () => {
+		const accounts = loadClaudeAccountsFromFile("/nonexistent/path/claude-accounts.json");
+		expect(accounts).toEqual([]);
+	});
+
+	test("returns accounts from JSON array format", () => {
+		const mockAccounts = [
+			{ label: "file-claude", sessionKey: "sk-ant-oat-123" },
+		];
+		writeFileSync(testFile, JSON.stringify(mockAccounts));
+
+		const accounts = loadClaudeAccountsFromFile(testFile);
+		expect(accounts.length).toBe(1);
+		expect(accounts[0].label).toBe("file-claude");
+		expect(accounts[0].source).toBe(testFile);
+	});
+
+	test("returns accounts from {accounts: [...]} format", () => {
+		const mockData = {
+			accounts: [
+				{ label: "file-claude-2", oauthToken: "oauth-token" },
+			],
+		};
+		writeFileSync(testFile, JSON.stringify(mockData));
+
+		const accounts = loadClaudeAccountsFromFile(testFile);
+		expect(accounts.length).toBe(1);
+		expect(accounts[0].label).toBe("file-claude-2");
+		expect(accounts[0].source).toBe(testFile);
+	});
+
+	test("returns empty array for invalid JSON file", () => {
+		writeFileSync(testFile, "not valid json");
+		const accounts = loadClaudeAccountsFromFile(testFile);
+		expect(accounts).toEqual([]);
+	});
+
+	test("filters out invalid accounts", () => {
+		const mockData = {
+			accounts: [
+				{ label: "valid", sessionKey: "sk-ant-oat-123" },
+				{ label: "invalid-no-auth" },
+			],
+		};
+		writeFileSync(testFile, JSON.stringify(mockData));
+
+		const accounts = loadClaudeAccountsFromFile(testFile);
+		expect(accounts.length).toBe(1);
+		expect(accounts[0].label).toBe("valid");
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Claude OAuth loading tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("loadClaudeOAuthFromEnv", () => {
+	let originalEnv;
+
+	beforeEach(() => {
+		originalEnv = process.env.CLAUDE_OAUTH_ACCOUNTS;
+	});
+
+	afterEach(() => {
+		if (originalEnv === undefined) {
+			delete process.env.CLAUDE_OAUTH_ACCOUNTS;
+		} else {
+			process.env.CLAUDE_OAUTH_ACCOUNTS = originalEnv;
+		}
+	});
+
+	test("returns empty array when CLAUDE_OAUTH_ACCOUNTS not set", () => {
+		delete process.env.CLAUDE_OAUTH_ACCOUNTS;
+		const accounts = loadClaudeOAuthFromEnv();
+		expect(accounts).toEqual([]);
+	});
+
+	test("returns accounts from JSON array format", () => {
+		const mockAccounts = [
+			{ label: "oauth-env", accessToken: "sk-ant-oat-123" },
+		];
+		process.env.CLAUDE_OAUTH_ACCOUNTS = JSON.stringify(mockAccounts);
+
+		const accounts = loadClaudeOAuthFromEnv();
+		expect(accounts.length).toBe(1);
+		expect(accounts[0].label).toBe("oauth-env");
+		expect(accounts[0].source).toBe("env:CLAUDE_OAUTH_ACCOUNTS");
+	});
+
+	test("returns accounts from {accounts: [...]} format", () => {
+		const mockData = {
+			accounts: [
+				{ label: "oauth-env-2", accessToken: "sk-ant-oat-456" },
+			],
+		};
+		process.env.CLAUDE_OAUTH_ACCOUNTS = JSON.stringify(mockData);
+
+		const accounts = loadClaudeOAuthFromEnv();
+		expect(accounts.length).toBe(1);
+		expect(accounts[0].label).toBe("oauth-env-2");
+	});
+
+	test("returns empty array for invalid JSON", () => {
+		process.env.CLAUDE_OAUTH_ACCOUNTS = "not valid json {";
+		const accounts = loadClaudeOAuthFromEnv();
+		expect(accounts).toEqual([]);
+	});
+
+	test("filters out accounts missing label or accessToken", () => {
+		const mockAccounts = [
+			{ label: "valid", accessToken: "sk-ant-oat-123" },
+			{ label: "no-token" },
+			{ accessToken: "sk-ant-oat-456" },
+		];
+		process.env.CLAUDE_OAUTH_ACCOUNTS = JSON.stringify(mockAccounts);
+
+		const accounts = loadClaudeOAuthFromEnv();
+		expect(accounts.length).toBe(1);
+		expect(accounts[0].label).toBe("valid");
+	});
+});
+
+describe("loadClaudeOAuthFromClaudeCode", () => {
+	const testDir = join(tmpdir(), "codex-quota-claude-oauth-test-" + Date.now());
+	const testCredentialsFile = join(testDir, ".credentials.json");
+	let originalEnv;
+
+	beforeEach(() => {
+		mkdirSync(testDir, { recursive: true });
+		originalEnv = process.env.CLAUDE_CREDENTIALS_PATH;
+		process.env.CLAUDE_CREDENTIALS_PATH = testCredentialsFile;
+	});
+
+	afterEach(() => {
+		rmSync(testDir, { recursive: true, force: true });
+		if (originalEnv === undefined) {
+			delete process.env.CLAUDE_CREDENTIALS_PATH;
+		} else {
+			process.env.CLAUDE_CREDENTIALS_PATH = originalEnv;
+		}
+	});
+
+	test("returns empty array when credentials file not found", () => {
+		const accounts = loadClaudeOAuthFromClaudeCode();
+		expect(accounts).toEqual([]);
+	});
+
+	test("returns account with OAuth credentials and user:profile scope", () => {
+		const mockCredentials = {
+			claudeAiOauth: {
+				accessToken: "sk-ant-oat-123",
+				refreshToken: "sk-ant-ort-456",
+				expiresAt: Date.now() + 3600000,
+				scopes: ["user:inference", "user:profile"],
+				subscriptionType: "max",
+				rateLimitTier: "default_claude_max_20x",
+			},
+		};
+		writeFileSync(testCredentialsFile, JSON.stringify(mockCredentials));
+
+		const accounts = loadClaudeOAuthFromClaudeCode();
+		expect(accounts.length).toBe(1);
+		expect(accounts[0].label).toBe("claude-code");
+		expect(accounts[0].accessToken).toBe("sk-ant-oat-123");
+		expect(accounts[0].subscriptionType).toBe("max");
+		expect(accounts[0].source).toBe(testCredentialsFile);
+	});
+
+	test("returns empty array when missing user:profile scope", () => {
+		const mockCredentials = {
+			claudeAiOauth: {
+				accessToken: "sk-ant-oat-123",
+				scopes: ["user:inference"], // Missing user:profile
+			},
+		};
+		writeFileSync(testCredentialsFile, JSON.stringify(mockCredentials));
+
+		const accounts = loadClaudeOAuthFromClaudeCode();
+		expect(accounts).toEqual([]);
+	});
+
+	test("returns empty array when accessToken is missing", () => {
+		const mockCredentials = {
+			claudeAiOauth: {
+				refreshToken: "sk-ant-ort-456",
+				scopes: ["user:profile"],
+			},
+		};
+		writeFileSync(testCredentialsFile, JSON.stringify(mockCredentials));
+
+		const accounts = loadClaudeOAuthFromClaudeCode();
+		expect(accounts).toEqual([]);
+	});
+});
+
+describe("loadAllClaudeOAuthAccounts", () => {
+	let originalEnv;
+
+	beforeEach(() => {
+		originalEnv = process.env.CLAUDE_OAUTH_ACCOUNTS;
+	});
+
+	afterEach(() => {
+		if (originalEnv === undefined) {
+			delete process.env.CLAUDE_OAUTH_ACCOUNTS;
+		} else {
+			process.env.CLAUDE_OAUTH_ACCOUNTS = originalEnv;
+		}
+	});
+
+	test("returns accounts from env with highest priority", () => {
+		const mockAccounts = [
+			{ label: "env-account", accessToken: "sk-ant-oat-env" },
+		];
+		process.env.CLAUDE_OAUTH_ACCOUNTS = JSON.stringify(mockAccounts);
+
+		const accounts = loadAllClaudeOAuthAccounts();
+		// Should include at least the env account
+		const envAccount = accounts.find(a => a.label === "env-account");
+		expect(envAccount).toBeDefined();
+		expect(envAccount.accessToken).toBe("sk-ant-oat-env");
+	});
+
+	test("deduplicates accounts by label", () => {
+		const mockAccounts = [
+			{ label: "duplicate", accessToken: "sk-ant-oat-1" },
+			{ label: "duplicate", accessToken: "sk-ant-oat-2" },
+		];
+		process.env.CLAUDE_OAUTH_ACCOUNTS = JSON.stringify(mockAccounts);
+
+		const accounts = loadAllClaudeOAuthAccounts();
+		const duplicates = accounts.filter(a => a.label === "duplicate");
+		// Only the first one should be kept
+		expect(duplicates.length).toBe(1);
+		expect(duplicates[0].accessToken).toBe("sk-ant-oat-1");
+	});
+});
+
+describe("fetchClaudeOAuthUsageForAccount", () => {
+	test("returns error when token is expired", async () => {
+		const account = {
+			label: "expired-account",
+			accessToken: "sk-ant-oat-expired",
+			expiresAt: Date.now() - 1000, // Expired 1 second ago
+			source: "test",
+		};
+
+		const result = await fetchClaudeOAuthUsageForAccount(account);
+		expect(result.success).toBe(false);
+		expect(result.error).toContain("expired");
+		expect(result.label).toBe("expired-account");
 	});
 });
 
