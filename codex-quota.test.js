@@ -14,7 +14,7 @@ import {
 	lstatSync,
 	symlinkSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { tmpdir, homedir } from "node:os";
 
 import {
@@ -39,6 +39,8 @@ import {
 	fetchClaudeOAuthUsage,
 	fetchClaudeOAuthUsageForAccount,
 	persistClaudeOAuthTokens,
+	ensureFreshToken,
+	persistOpenAiOAuthTokens,
 	// OpenAI OAuth utilities
 	generatePKCE,
 	generateState,
@@ -1044,6 +1046,245 @@ describe("persistClaudeOAuthTokens", () => {
 		expect(updatedAccount.oauthRefreshToken).toBe("sk-ant-ort-new");
 		const untouchedAccount = updatedClaudeAccounts.accounts.find(entry => entry.label === "other");
 		expect(untouchedAccount.oauthToken).toBe("sk-ant-oat-keep");
+	});
+});
+
+describe("ensureFreshToken", () => {
+	const testDir = join(tmpdir(), "codex-quota-openai-refresh-" + Date.now());
+	const testAuthFile = join(testDir, "auth.json");
+	let originalFetch;
+	let originalCodexAuthPath;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+		originalCodexAuthPath = process.env.CODEX_AUTH_PATH;
+		mkdirSync(testDir, { recursive: true });
+		process.env.CODEX_AUTH_PATH = testAuthFile;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		rmSync(testDir, { recursive: true, force: true });
+		if (originalCodexAuthPath === undefined) {
+			delete process.env.CODEX_AUTH_PATH;
+		} else {
+			process.env.CODEX_AUTH_PATH = originalCodexAuthPath;
+		}
+	});
+
+	test("refreshes and persists codex auth tokens", async () => {
+		const oldAccess = createMockAccessToken(MOCK_ACCOUNT_ID, "old@example.com");
+		const newAccess = createMockAccessToken(MOCK_ACCOUNT_ID, "new@example.com");
+		const oldRefresh = "refresh-old-openai";
+		const newRefresh = "refresh-new-openai";
+		const authPayload = {
+			tokens: {
+				access_token: oldAccess,
+				refresh_token: oldRefresh,
+				account_id: MOCK_ACCOUNT_ID,
+				expires_at: Math.floor((Date.now() - 1000) / 1000),
+				id_token: "id-old",
+			},
+		};
+		writeFileSync(testAuthFile, JSON.stringify(authPayload, null, 2) + "\n", "utf-8");
+
+		globalThis.fetch = async (url, options) => {
+			if (url === "https://auth.openai.com/oauth/token") {
+				const params = options.body instanceof URLSearchParams
+					? options.body
+					: new URLSearchParams(options.body);
+				expect(params.get("grant_type")).toBe("refresh_token");
+				expect(params.get("refresh_token")).toBe(oldRefresh);
+				return new Response(JSON.stringify({
+					access_token: newAccess,
+					refresh_token: newRefresh,
+					expires_in: 3600,
+				}), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response("Not found", { status: 404 });
+		};
+
+		const account = {
+			label: "codex-cli",
+			accountId: MOCK_ACCOUNT_ID,
+			access: oldAccess,
+			refresh: oldRefresh,
+			expires: Date.now() - 1000,
+			source: testAuthFile,
+		};
+
+		const result = await ensureFreshToken(account, [account]);
+		expect(result).toBe(true);
+		expect(account.access).toBe(newAccess);
+		expect(account.refresh).toBe(newRefresh);
+
+		const updatedAuth = JSON.parse(readFileSync(testAuthFile, "utf-8"));
+		expect(updatedAuth.tokens.access_token).toBe(newAccess);
+		expect(updatedAuth.tokens.refresh_token).toBe(newRefresh);
+		expect(updatedAuth.tokens.account_id).toBe(MOCK_ACCOUNT_ID);
+		expect(updatedAuth.tokens.id_token).toBe("id-old");
+		expect(updatedAuth.tokens.expires_at).toBe(Math.floor(account.expires / 1000));
+	});
+});
+
+describe("persistOpenAiOAuthTokens", () => {
+	const testDir = join(tmpdir(), "codex-quota-openai-persist-" + Date.now());
+	const testAuthFile = join(testDir, "auth.json");
+	const opencodeAuthPath = join(testDir, "opencode", "auth.json");
+	const codexAccountsPath = MULTI_ACCOUNT_PATHS[0];
+	const opencodeAccountsPath = MULTI_ACCOUNT_PATHS[1];
+	let originalCodexAuthPath;
+	let originalXdgEnv;
+	let originalCodexAccounts;
+	let originalOpencodeAccounts;
+
+	beforeEach(() => {
+		mkdirSync(join(testDir, "opencode"), { recursive: true });
+		originalCodexAuthPath = process.env.CODEX_AUTH_PATH;
+		originalXdgEnv = process.env.XDG_DATA_HOME;
+		process.env.CODEX_AUTH_PATH = testAuthFile;
+		process.env.XDG_DATA_HOME = testDir;
+		originalCodexAccounts = existsSync(codexAccountsPath)
+			? readFileSync(codexAccountsPath, "utf-8")
+			: null;
+		originalOpencodeAccounts = existsSync(opencodeAccountsPath)
+			? readFileSync(opencodeAccountsPath, "utf-8")
+			: null;
+		mkdirSync(dirname(opencodeAccountsPath), { recursive: true });
+	});
+
+	afterEach(() => {
+		rmSync(testDir, { recursive: true, force: true });
+		if (originalCodexAuthPath === undefined) {
+			delete process.env.CODEX_AUTH_PATH;
+		} else {
+			process.env.CODEX_AUTH_PATH = originalCodexAuthPath;
+		}
+		if (originalXdgEnv === undefined) {
+			delete process.env.XDG_DATA_HOME;
+		} else {
+			process.env.XDG_DATA_HOME = originalXdgEnv;
+		}
+		if (originalCodexAccounts === null) {
+			if (existsSync(codexAccountsPath)) {
+				rmSync(codexAccountsPath, { force: true });
+			}
+		} else {
+			writeFileSync(codexAccountsPath, originalCodexAccounts);
+		}
+		if (originalOpencodeAccounts === null) {
+			if (existsSync(opencodeAccountsPath)) {
+				rmSync(opencodeAccountsPath, { force: true });
+			}
+		} else {
+			writeFileSync(opencodeAccountsPath, originalOpencodeAccounts);
+		}
+	});
+
+	test("updates matching stores", () => {
+		const oldAccess = createMockAccessToken(MOCK_ACCOUNT_ID);
+		const newAccess = createMockAccessToken(MOCK_ACCOUNT_ID, "new@example.com");
+		const oldRefresh = "refresh-old-openai";
+		const newRefresh = "refresh-new-openai";
+		const newExpires = Date.now() + 3600 * 1000;
+
+		const codexAuthPayload = {
+			tokens: {
+				access_token: oldAccess,
+				refresh_token: oldRefresh,
+				account_id: MOCK_ACCOUNT_ID,
+				expires_at: Math.floor(newExpires / 1000),
+				id_token: "id-old",
+			},
+		};
+		writeFileSync(testAuthFile, JSON.stringify(codexAuthPayload, null, 2) + "\n", "utf-8");
+
+		const opencodePayload = {
+			openai: {
+				type: "oauth",
+				access: oldAccess,
+				refresh: oldRefresh,
+				expires: Date.now() + 60000,
+				accountId: MOCK_ACCOUNT_ID,
+			},
+		};
+		writeFileSync(opencodeAuthPath, JSON.stringify(opencodePayload, null, 2) + "\n", "utf-8");
+
+		const codexAccountsPayload = {
+			accounts: [
+				{
+					label: "work",
+					accountId: MOCK_ACCOUNT_ID,
+					access: oldAccess,
+					refresh: oldRefresh,
+					expires: 1111,
+					idToken: "id-old",
+				},
+				{
+					label: "other",
+					accountId: "acc_other",
+					access: "keep_access",
+					refresh: "keep_refresh",
+					expires: 2222,
+				},
+			],
+		};
+		writeFileSync(codexAccountsPath, JSON.stringify(codexAccountsPayload, null, 2) + "\n", "utf-8");
+
+		const opencodeAccountsPayload = {
+			accounts: [
+				{
+					label: "other",
+					accountId: "acc_other",
+					access: "keep_access",
+					refresh: "keep_refresh",
+					expires: 2222,
+				},
+			],
+		};
+		writeFileSync(opencodeAccountsPath, JSON.stringify(opencodeAccountsPayload, null, 2) + "\n", "utf-8");
+
+		const account = {
+			label: "work",
+			accountId: MOCK_ACCOUNT_ID,
+			access: newAccess,
+			refresh: newRefresh,
+			expires: newExpires,
+			source: "test",
+		};
+
+		const result = persistOpenAiOAuthTokens(account, {
+			previousAccessToken: oldAccess,
+			previousRefreshToken: oldRefresh,
+		});
+		expect(result.updatedPaths).toContain(testAuthFile);
+		expect(result.updatedPaths).toContain(opencodeAuthPath);
+		expect(result.updatedPaths).toContain(codexAccountsPath);
+		expect(result.updatedPaths).not.toContain(opencodeAccountsPath);
+
+		const updatedAuth = JSON.parse(readFileSync(testAuthFile, "utf-8"));
+		expect(updatedAuth.tokens.access_token).toBe(newAccess);
+		expect(updatedAuth.tokens.refresh_token).toBe(newRefresh);
+		expect(updatedAuth.tokens.id_token).toBe("id-old");
+
+		const updatedOpencode = JSON.parse(readFileSync(opencodeAuthPath, "utf-8"));
+		expect(updatedOpencode.openai.access).toBe(newAccess);
+		expect(updatedOpencode.openai.refresh).toBe(newRefresh);
+
+		const updatedAccounts = JSON.parse(readFileSync(codexAccountsPath, "utf-8"));
+		const updatedAccount = updatedAccounts.accounts.find(entry => entry.label === "work");
+		expect(updatedAccount.access).toBe(newAccess);
+		expect(updatedAccount.refresh).toBe(newRefresh);
+		expect(updatedAccount.expires).toBe(newExpires);
+		expect(updatedAccount.idToken).toBe("id-old");
+		const untouchedAccount = updatedAccounts.accounts.find(entry => entry.label === "other");
+		expect(untouchedAccount.access).toBe("keep_access");
+
+		const untouchedOpencodeAccounts = JSON.parse(readFileSync(opencodeAccountsPath, "utf-8"));
+		expect(untouchedOpencodeAccounts).toEqual(opencodeAccountsPayload);
 	});
 });
 
