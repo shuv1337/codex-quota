@@ -47,6 +47,7 @@ const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const REDIRECT_URI = "http://localhost:1455/auth/callback";
 const SCOPE = "openid profile email offline_access";
 const OAUTH_TIMEOUT_MS = 120000; // 2 minutes
+const OPENAI_OAUTH_REFRESH_BUFFER_MS = 60 * 1000;
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const JWT_CLAIM = "https://api.openai.com/auth";
 const JWT_PROFILE = "https://api.openai.com/profile";
@@ -629,6 +630,214 @@ function updatePiAuth(account) {
 	return { updated: true, path: authPath };
 }
 
+function isOpenAiOauthTokenMatch({
+	storedAccess,
+	storedRefresh,
+	previousAccess,
+	previousRefresh,
+	label,
+	storedLabel,
+}) {
+	if (previousRefresh && storedRefresh && storedRefresh === previousRefresh) return true;
+	if (previousAccess && storedAccess && storedAccess === previousAccess) return true;
+	if (!storedAccess && !storedRefresh && label && storedLabel && label === storedLabel) return true;
+	return false;
+}
+
+function normalizeOpenAiOauthEntryTokens(entry) {
+	return {
+		access: entry?.access ?? entry?.access_token ?? null,
+		refresh: entry?.refresh ?? entry?.refresh_token ?? null,
+		expires: entry?.expires ?? entry?.expires_at ?? null,
+		accountId: entry?.accountId ?? entry?.account_id ?? null,
+		idToken: entry?.idToken ?? entry?.id_token ?? null,
+	};
+}
+
+function updateOpenAiOauthEntry(entry, account) {
+	const accessKey = "access" in entry
+		? "access"
+		: "access_token" in entry
+			? "access_token"
+			: "access";
+	const refreshKey = "refresh" in entry
+		? "refresh"
+		: "refresh_token" in entry
+			? "refresh_token"
+			: "refresh";
+	const expiresKey = "expires" in entry
+		? "expires"
+		: "expires_at" in entry
+			? "expires_at"
+			: "expires";
+	const accountIdKey = "accountId" in entry
+		? "accountId"
+		: "account_id" in entry
+			? "account_id"
+			: "accountId";
+	const idTokenKey = "idToken" in entry
+		? "idToken"
+		: "id_token" in entry
+			? "id_token"
+			: "idToken";
+
+	entry[accessKey] = account.access;
+	entry[refreshKey] = account.refresh;
+	entry[expiresKey] = account.expires ?? null;
+	entry[accountIdKey] = account.accountId;
+	if (account.idToken) {
+		entry[idTokenKey] = account.idToken;
+	}
+
+	return entry;
+}
+
+/**
+ * Persist refreshed OpenAI OAuth tokens to all known stores that match.
+ * @param {{ label: string, access: string, refresh: string, expires?: number, accountId: string, idToken?: string, source?: string }} account
+ * @param {{ previousAccessToken?: string | null, previousRefreshToken?: string | null }} previousTokens
+ * @returns {{ updatedPaths: string[], errors: string[] }}
+ */
+function persistOpenAiOAuthTokens(account, previousTokens = {}) {
+	const updatedPaths = [];
+	const errors = [];
+	const previousAccess = previousTokens.previousAccessToken ?? null;
+	const previousRefresh = previousTokens.previousRefreshToken ?? null;
+
+	if (account.source?.startsWith("env")) {
+		return { updatedPaths, errors };
+	}
+
+	const codexAuthPath = getCodexCliAuthPath();
+	if (existsSync(codexAuthPath)) {
+		try {
+			const raw = readFileSync(codexAuthPath, "utf-8");
+			const parsed = JSON.parse(raw);
+			const tokens = parsed?.tokens;
+			if (!tokens || typeof tokens !== "object" || Array.isArray(tokens)) {
+				errors.push(`Invalid Codex auth.json format at ${codexAuthPath}`);
+			} else {
+				const storedAccess = tokens.access_token ?? null;
+				const storedRefresh = tokens.refresh_token ?? null;
+				if (isOpenAiOauthTokenMatch({
+					storedAccess,
+					storedRefresh,
+					previousAccess,
+					previousRefresh,
+					label: account.label,
+					storedLabel: parsed?.codex_quota_label ?? null,
+				})) {
+					const updatedTokens = {
+						...tokens,
+						access_token: account.access,
+						refresh_token: account.refresh,
+						account_id: account.accountId,
+					};
+					if (account.expires) {
+						updatedTokens.expires_at = Math.floor(account.expires / 1000);
+					}
+					if (account.idToken) {
+						updatedTokens.id_token = account.idToken;
+					}
+					const updatedPayload = { ...parsed, tokens: updatedTokens };
+					writeFileAtomic(codexAuthPath, JSON.stringify(updatedPayload, null, 2) + "\n", { mode: 0o600 });
+					updatedPaths.push(codexAuthPath);
+				}
+			}
+		} catch (err) {
+			const message = err?.message ?? String(err);
+			errors.push(`Failed to update ${codexAuthPath}: ${message}`);
+		}
+	}
+
+	const opencodePath = getOpencodeAuthPath();
+	if (existsSync(opencodePath)) {
+		try {
+			const raw = readFileSync(opencodePath, "utf-8");
+			const parsed = JSON.parse(raw);
+			const openai = parsed?.openai ?? null;
+			const storedAccess = openai?.access ?? null;
+			const storedRefresh = openai?.refresh ?? null;
+			if (isOpenAiOauthTokenMatch({
+				storedAccess,
+				storedRefresh,
+				previousAccess,
+				previousRefresh,
+				label: account.label,
+				storedLabel: "opencode",
+			})) {
+				const result = updateOpencodeAuth(account);
+				if (result.updated) updatedPaths.push(result.path);
+				if (result.error) errors.push(result.error);
+			}
+		} catch {
+			// ignore parse errors, handled by updateOpencodeAuth
+		}
+	}
+
+	const piPath = getPiAuthPath();
+	if (existsSync(piPath)) {
+		try {
+			const raw = readFileSync(piPath, "utf-8");
+			const parsed = JSON.parse(raw);
+			const codex = parsed?.["openai-codex"] ?? null;
+			const storedAccess = codex?.access ?? null;
+			const storedRefresh = codex?.refresh ?? null;
+			if (isOpenAiOauthTokenMatch({
+				storedAccess,
+				storedRefresh,
+				previousAccess,
+				previousRefresh,
+				label: account.label,
+				storedLabel: "pi",
+			})) {
+				const result = updatePiAuth(account);
+				if (result.updated) updatedPaths.push(result.path);
+				if (result.error) errors.push(result.error);
+			}
+		} catch {
+			// ignore parse errors, handled by updatePiAuth
+		}
+	}
+
+	for (const path of MULTI_ACCOUNT_PATHS) {
+		if (!existsSync(path)) continue;
+		try {
+			const raw = readFileSync(path, "utf-8");
+			const parsed = JSON.parse(raw);
+			const isArray = Array.isArray(parsed);
+			const accounts = isArray ? parsed : parsed?.accounts ?? [];
+			let updated = false;
+			const updatedAccounts = accounts.map(entry => {
+				if (!entry || typeof entry !== "object") return entry;
+				const stored = normalizeOpenAiOauthEntryTokens(entry);
+				const matches = isOpenAiOauthTokenMatch({
+					storedAccess: stored.access,
+					storedRefresh: stored.refresh,
+					previousAccess,
+					previousRefresh,
+					label: account.label,
+					storedLabel: entry?.label ?? null,
+				});
+				if (!matches) return entry;
+				updated = true;
+				return updateOpenAiOauthEntry({ ...entry }, account);
+			});
+
+			if (updated) {
+				const nextPayload = isArray ? updatedAccounts : { ...parsed, accounts: updatedAccounts };
+				writeFileAtomic(path, JSON.stringify(nextPayload, null, 2) + "\n", { mode: 0o600 });
+				updatedPaths.push(path);
+			}
+		} catch (err) {
+			const message = err?.message ?? String(err);
+			errors.push(`Failed to update ${path}: ${message}`);
+		}
+	}
+
+	return { updatedPaths, errors };
+}
+
 /**
  * Update Claude Code credentials with new OAuth tokens
  * @param {{ oauthToken: string, oauthRefreshToken?: string | null, oauthExpiresAt?: number | null, oauthScopes?: string[] | null }} account
@@ -1020,10 +1229,15 @@ async function refreshToken(refreshToken) {
 	};
 }
 
+function isOpenAiOauthTokenExpiring(expires) {
+	if (!expires) return true;
+	return expires <= Date.now() + OPENAI_OAUTH_REFRESH_BUFFER_MS;
+}
+
 async function ensureFreshToken(account, allAccounts) {
-	if (account.expires && account.expires > Date.now() + 60000) {
-		return true;
-	}
+	if (!isOpenAiOauthTokenExpiring(account.expires)) return true;
+	const previousAccessToken = account.access;
+	const previousRefreshToken = account.refresh;
 	const refreshed = await refreshToken(account.refresh);
 	if (!refreshed) return false;
 	
@@ -1035,7 +1249,10 @@ async function ensureFreshToken(account, allAccounts) {
 	account.refresh = refreshed.refresh;
 	account.expires = refreshed.expires;
 	account.updatedAt = Date.now();
-	saveAccounts(allAccounts);
+	persistOpenAiOAuthTokens(account, {
+		previousAccessToken,
+		previousRefreshToken,
+	});
 	return true;
 }
 
@@ -5377,6 +5594,8 @@ export {
 	fetchClaudeOAuthUsageForAccount,
 	ensureFreshClaudeOAuthToken,
 	persistClaudeOAuthTokens,
+	ensureFreshToken,
+	persistOpenAiOAuthTokens,
 	
 	// OAuth PKCE utilities
 	generatePKCE,
