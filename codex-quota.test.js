@@ -4,7 +4,7 @@
  * Run with: bun test
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import {
 	writeFileSync,
 	mkdirSync,
@@ -22,6 +22,7 @@ import {
 	loadAccountsFromFile,
 	loadAccountFromCodexCli,
 	loadAllAccounts,
+	loadAllAccountsNoDedup,
 	findAccountByLabel,
 	getAllLabels,
 	isValidAccount,
@@ -41,6 +42,8 @@ import {
 	persistClaudeOAuthTokens,
 	ensureFreshToken,
 	persistOpenAiOAuthTokens,
+	detectCodexDivergence,
+	detectClaudeDivergence,
 	// OpenAI OAuth utilities
 	generatePKCE,
 	generateState,
@@ -66,18 +69,60 @@ import {
 	colorize,
 	setNoColorFlag,
 	handleSwitch,
+	handleCodexSync,
 	handleRemove,
+	handleClaudeSwitch,
+	handleClaudeSync,
+	handleClaudeRemove,
 	MULTI_ACCOUNT_PATHS,
 	CODEX_CLI_AUTH_PATH,
 	PRIMARY_CMD,
 	CLAUDE_MULTI_ACCOUNT_PATHS,
 	printHelp,
 	printHelpAdd,
+	printHelpCodexSync,
+	printHelpClaudeSync,
 	printHelpSwitch,
 	printHelpList,
 	printHelpRemove,
 	printHelpQuota,
 } from "./codex-quota.js";
+
+// Ensure pi auth writes never touch the real home directory during tests
+const TEST_PI_AUTH_DIR = join(tmpdir(), "codex-quota-pi-auth-" + Date.now());
+const TEST_PI_AUTH_PATH = join(TEST_PI_AUTH_DIR, "auth.json");
+const ORIGINAL_PI_AUTH_PATH = process.env.PI_AUTH_PATH;
+
+beforeAll(() => {
+	process.env.PI_AUTH_PATH = TEST_PI_AUTH_PATH;
+});
+
+afterAll(() => {
+	if (ORIGINAL_PI_AUTH_PATH === undefined) {
+		delete process.env.PI_AUTH_PATH;
+	} else {
+		process.env.PI_AUTH_PATH = ORIGINAL_PI_AUTH_PATH;
+	}
+	rmSync(TEST_PI_AUTH_DIR, { recursive: true, force: true });
+});
+
+function backupFileContents(filePath) {
+	return existsSync(filePath) ? readFileSync(filePath, "utf-8") : null;
+}
+
+function restoreFileContents(filePath, backup) {
+	if (backup === null) {
+		rmSync(filePath, { force: true });
+		return;
+	}
+	mkdirSync(dirname(filePath), { recursive: true });
+	writeFileSync(filePath, backup, "utf-8");
+}
+
+function writeJsonFile(filePath, value) {
+	mkdirSync(dirname(filePath), { recursive: true });
+	writeFileSync(filePath, JSON.stringify(value, null, 2) + "\n", "utf-8");
+}
 
 import {
 	buildChecks,
@@ -154,7 +199,15 @@ describe("help output", () => {
 	});
 
 	test("all subcommand help contains 'codex-quota'", () => {
-		const helpFunctions = [printHelpAdd, printHelpSwitch, printHelpList, printHelpRemove, printHelpQuota];
+		const helpFunctions = [
+			printHelpAdd,
+			printHelpSwitch,
+			printHelpCodexSync,
+			printHelpClaudeSync,
+			printHelpList,
+			printHelpRemove,
+			printHelpQuota,
+		];
 		
 		for (const helpFn of helpFunctions) {
 			consoleOutput = [];
@@ -1286,6 +1339,60 @@ describe("persistOpenAiOAuthTokens", () => {
 		const untouchedOpencodeAccounts = JSON.parse(readFileSync(opencodeAccountsPath, "utf-8"));
 		expect(untouchedOpencodeAccounts).toEqual(opencodeAccountsPayload);
 	});
+
+	test("preserves root fields and markers in multi-account file", () => {
+		const oldAccess = createMockAccessToken("acc_preserve_work", "preserve@example.com");
+		const newAccess = createMockAccessToken("acc_preserve_work", "preserve-new@example.com");
+		const oldRefresh = "refresh-preserve-old";
+		const newRefresh = "refresh-preserve-new";
+		const newExpires = Date.now() + 2 * 60 * 60 * 1000;
+
+		const codexAccountsPayload = {
+			schemaVersion: 5,
+			activeLabel: "work-preserve",
+			meta: { keep: true },
+			accounts: [
+				{
+					label: "work-preserve",
+					accountId: "acc_preserve_work",
+					access: oldAccess,
+					refresh: oldRefresh,
+					expires: 1111,
+				},
+				{
+					label: "other-preserve",
+					accountId: "acc_preserve_other",
+					access: "keep_access",
+					refresh: "keep_refresh",
+					expires: 2222,
+				},
+			],
+		};
+		writeJsonFile(codexAccountsPath, codexAccountsPayload);
+
+		const account = {
+			label: "work-preserve",
+			accountId: "acc_preserve_work",
+			access: newAccess,
+			refresh: newRefresh,
+			expires: newExpires,
+			source: codexAccountsPath,
+		};
+
+		persistOpenAiOAuthTokens(account, {
+			previousAccessToken: oldAccess,
+			previousRefreshToken: oldRefresh,
+		});
+
+		const updatedAccounts = JSON.parse(readFileSync(codexAccountsPath, "utf-8"));
+		expect(updatedAccounts.schemaVersion).toBe(5);
+		expect(updatedAccounts.activeLabel).toBe("work-preserve");
+		expect(updatedAccounts.meta.keep).toBe(true);
+		const updatedWork = updatedAccounts.accounts.find(entry => entry.label === "work-preserve");
+		expect(updatedWork.access).toBe(newAccess);
+		expect(updatedWork.refresh).toBe(newRefresh);
+		expect(updatedWork.expires).toBe(newExpires);
+	});
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1965,8 +2072,8 @@ describe("getAllLabels", () => {
 		expect(labels).toContain("personal");
 	});
 
-	test("returns unique labels (deduplicates by email)", () => {
-		// Same email means they get deduplicated, even with different accountIds
+	test("returns all labels even when emails duplicate (no-dedup resolution)", () => {
+		// Same email across workspaces should not hide valid labels
 		const mockAccounts = [
 			{ label: "dedup-test-1", accountId: MOCK_ACCOUNT_ID, access: createMockAccessToken(MOCK_ACCOUNT_ID, "dedup-same@example.com"), refresh: MOCK_REFRESH_TOKEN },
 			{ label: "dedup-test-2", accountId: "acc_67890", access: createMockAccessToken("acc_67890", "dedup-same@example.com"), refresh: MOCK_REFRESH_TOKEN },
@@ -1974,10 +2081,8 @@ describe("getAllLabels", () => {
 		process.env.CODEX_ACCOUNTS = JSON.stringify(mockAccounts);
 		
 		const labels = getAllLabels();
-		// Only first account kept (by email), so "dedup-test-1" should be present
-		// but "dedup-test-2" should be deduplicated away
 		expect(labels).toContain("dedup-test-1");
-		expect(labels).not.toContain("dedup-test-2");
+		expect(labels).toContain("dedup-test-2");
 	});
 });
 
@@ -2772,6 +2877,677 @@ describe("handleRemove", () => {
 		const output = JSON.parse(jsonEntry);
 		expect(output.success).toBe(false);
 		expect(output.error).toContain("Cannot remove account from CODEX_ACCOUNTS env var");
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Active label behavior tests (Codex)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("activeLabel behavior (codex)", () => {
+	const testDir = join(tmpdir(), "codex-active-label-" + Date.now());
+	const testAuthPath = join(testDir, ".codex", "auth.json");
+	const codexAccountsPath = MULTI_ACCOUNT_PATHS[0];
+	const opencodeAccountsPath = MULTI_ACCOUNT_PATHS[1];
+	let originalCodexAccountsEnv;
+	let originalCodexAuthPath;
+	let originalXdgDataHome;
+	let codexAccountsBackup;
+	let opencodeAccountsBackup;
+	let originalConsoleLog;
+	let originalConsoleError;
+
+	beforeEach(() => {
+		originalCodexAccountsEnv = process.env.CODEX_ACCOUNTS;
+		originalCodexAuthPath = process.env.CODEX_AUTH_PATH;
+		originalXdgDataHome = process.env.XDG_DATA_HOME;
+		codexAccountsBackup = backupFileContents(codexAccountsPath);
+		opencodeAccountsBackup = backupFileContents(opencodeAccountsPath);
+		delete process.env.CODEX_ACCOUNTS;
+		process.env.CODEX_AUTH_PATH = testAuthPath;
+		process.env.XDG_DATA_HOME = testDir;
+		mkdirSync(dirname(testAuthPath), { recursive: true });
+		originalConsoleLog = console.log;
+		originalConsoleError = console.error;
+		console.log = () => {};
+		console.error = () => {};
+	});
+
+	afterEach(() => {
+		console.log = originalConsoleLog;
+		console.error = originalConsoleError;
+		if (originalCodexAccountsEnv === undefined) {
+			delete process.env.CODEX_ACCOUNTS;
+		} else {
+			process.env.CODEX_ACCOUNTS = originalCodexAccountsEnv;
+		}
+		if (originalCodexAuthPath === undefined) {
+			delete process.env.CODEX_AUTH_PATH;
+		} else {
+			process.env.CODEX_AUTH_PATH = originalCodexAuthPath;
+		}
+		if (originalXdgDataHome === undefined) {
+			delete process.env.XDG_DATA_HOME;
+		} else {
+			process.env.XDG_DATA_HOME = originalXdgDataHome;
+		}
+		restoreFileContents(codexAccountsPath, codexAccountsBackup);
+		restoreFileContents(opencodeAccountsPath, opencodeAccountsBackup);
+		rmSync(testDir, { recursive: true, force: true });
+	});
+
+	test("switch sets activeLabel and preserves root fields", async () => {
+		const workAccountId = "acc_active_work";
+		const payload = {
+			schemaVersion: 7,
+			activeLabel: "old-label",
+			meta: { keep: true },
+			accounts: [
+				{
+					label: "work-active",
+					accountId: workAccountId,
+					access: createMockAccessToken(workAccountId, "active-work@example.com"),
+					refresh: "refresh-work-active",
+					expires: Date.now() + 24 * 60 * 60 * 1000,
+				},
+				{
+					label: "other-active",
+					accountId: "acc_active_other",
+					access: createMockAccessToken("acc_active_other", "active-other@example.com"),
+					refresh: "refresh-other-active",
+					expires: Date.now() + 24 * 60 * 60 * 1000,
+				},
+			],
+		};
+		writeJsonFile(codexAccountsPath, payload);
+
+		await handleSwitch(["work-active"], { json: true });
+
+		const updated = JSON.parse(readFileSync(codexAccountsPath, "utf-8"));
+		expect(updated.activeLabel).toBe("work-active");
+		expect(updated.schemaVersion).toBe(7);
+		expect(updated.meta.keep).toBe(true);
+	});
+
+	test("remove clears activeLabel and codex_quota_label when accountId matches", async () => {
+		const workAccountId = "acc_remove_work";
+		const payload = {
+			schemaVersion: 3,
+			activeLabel: "work-remove",
+			meta: { keep: "root" },
+			accounts: [
+				{
+					label: "work-remove",
+					accountId: workAccountId,
+					access: createMockAccessToken(workAccountId, "remove-work@example.com"),
+					refresh: "refresh-work-remove",
+					expires: Date.now() + 24 * 60 * 60 * 1000,
+				},
+				{
+					label: "other-remove",
+					accountId: "acc_remove_other",
+					access: createMockAccessToken("acc_remove_other", "remove-other@example.com"),
+					refresh: "refresh-other-remove",
+					expires: Date.now() + 24 * 60 * 60 * 1000,
+				},
+			],
+		};
+		writeJsonFile(codexAccountsPath, payload);
+
+		const cliAuthPayload = {
+			codex_quota_label: "work-remove",
+			tokens: {
+				access_token: createMockAccessToken(workAccountId, "remove-work@example.com"),
+				refresh_token: "refresh-work-remove",
+				expires_at: Math.floor((Date.now() + 3600 * 1000) / 1000),
+				account_id: workAccountId,
+			},
+		};
+		writeJsonFile(testAuthPath, cliAuthPayload);
+
+		await handleRemove(["work-remove"], { json: true });
+
+		const updatedAccounts = JSON.parse(readFileSync(codexAccountsPath, "utf-8"));
+		expect(updatedAccounts.activeLabel).toBeNull();
+		expect(updatedAccounts.meta.keep).toBe("root");
+		const remainingLabels = updatedAccounts.accounts.map(entry => entry.label);
+		expect(remainingLabels).toContain("other-remove");
+		expect(remainingLabels).not.toContain("work-remove");
+
+		const updatedCliAuth = JSON.parse(readFileSync(testAuthPath, "utf-8"));
+		expect(updatedCliAuth.codex_quota_label).toBeUndefined();
+		expect(updatedCliAuth.tokens.account_id).toBe(workAccountId);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Divergence detection tests (Codex)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("detectCodexDivergence", () => {
+	const testDir = join(tmpdir(), "codex-divergence-" + Date.now());
+	const testAuthPath = join(testDir, ".codex", "auth.json");
+	const codexAccountsPath = MULTI_ACCOUNT_PATHS[0];
+	const opencodeAccountsPath = MULTI_ACCOUNT_PATHS[1];
+	let originalCodexAccountsEnv;
+	let originalCodexAuthPath;
+	let originalXdgDataHome;
+	let codexAccountsBackup;
+	let opencodeAccountsBackup;
+
+	beforeEach(() => {
+		originalCodexAccountsEnv = process.env.CODEX_ACCOUNTS;
+		originalCodexAuthPath = process.env.CODEX_AUTH_PATH;
+		originalXdgDataHome = process.env.XDG_DATA_HOME;
+		codexAccountsBackup = backupFileContents(codexAccountsPath);
+		opencodeAccountsBackup = backupFileContents(opencodeAccountsPath);
+		delete process.env.CODEX_ACCOUNTS;
+		process.env.CODEX_AUTH_PATH = testAuthPath;
+		process.env.XDG_DATA_HOME = testDir;
+		mkdirSync(dirname(testAuthPath), { recursive: true });
+	});
+
+	afterEach(() => {
+		if (originalCodexAccountsEnv === undefined) {
+			delete process.env.CODEX_ACCOUNTS;
+		} else {
+			process.env.CODEX_ACCOUNTS = originalCodexAccountsEnv;
+		}
+		if (originalCodexAuthPath === undefined) {
+			delete process.env.CODEX_AUTH_PATH;
+		} else {
+			process.env.CODEX_AUTH_PATH = originalCodexAuthPath;
+		}
+		if (originalXdgDataHome === undefined) {
+			delete process.env.XDG_DATA_HOME;
+		} else {
+			process.env.XDG_DATA_HOME = originalXdgDataHome;
+		}
+		restoreFileContents(codexAccountsPath, codexAccountsBackup);
+		restoreFileContents(opencodeAccountsPath, opencodeAccountsBackup);
+		rmSync(testDir, { recursive: true, force: true });
+	});
+
+	test("prefers tokens.account_id over JWT decode", () => {
+		const activeAccountId = "acc_diverge_active";
+		const payload = {
+			schemaVersion: 2,
+			activeLabel: "diverge-work",
+			accounts: [
+				{
+					label: "diverge-work",
+					accountId: activeAccountId,
+					access: createMockAccessToken(activeAccountId, "diverge@example.com"),
+					refresh: "refresh-diverge",
+					expires: Date.now() + 24 * 60 * 60 * 1000,
+				},
+			],
+		};
+		writeJsonFile(codexAccountsPath, payload);
+
+		const mismatchedJwtAccountId = "acc_diverge_other";
+		const cliAuthPayload = {
+			codex_quota_label: "diverge-work",
+			tokens: {
+				access_token: createMockAccessToken(mismatchedJwtAccountId, "diverge@example.com"),
+				refresh_token: "refresh-diverge",
+				expires_at: Math.floor((Date.now() + 3600 * 1000) / 1000),
+				account_id: activeAccountId,
+			},
+		};
+		writeJsonFile(testAuthPath, cliAuthPayload);
+
+		const divergence = detectCodexDivergence({ allowMigration: false });
+		expect(divergence.cliAccountId).toBe(activeAccountId);
+		expect(divergence.diverged).toBe(false);
+		expect(divergence.activeLabel).toBe("diverge-work");
+	});
+
+	test("migrates codex_quota_label when accountId matches", () => {
+		const activeAccountId = "acc_migrate_match";
+		const payload = {
+			meta: { keep: true },
+			accounts: [
+				{
+					label: "migrate-work",
+					accountId: activeAccountId,
+					access: createMockAccessToken(activeAccountId, "migrate@example.com"),
+					refresh: "refresh-migrate",
+					expires: Date.now() + 24 * 60 * 60 * 1000,
+				},
+			],
+		};
+		writeJsonFile(codexAccountsPath, payload);
+
+		const cliAuthPayload = {
+			codex_quota_label: "migrate-work",
+			tokens: {
+				access_token: createMockAccessToken(activeAccountId, "migrate@example.com"),
+				refresh_token: "refresh-migrate",
+				expires_at: Math.floor((Date.now() + 3600 * 1000) / 1000),
+				account_id: activeAccountId,
+			},
+		};
+		writeJsonFile(testAuthPath, cliAuthPayload);
+
+		const divergence = detectCodexDivergence();
+		expect(divergence.migrated).toBe(true);
+		expect(divergence.activeLabel).toBe("migrate-work");
+
+		const updated = JSON.parse(readFileSync(codexAccountsPath, "utf-8"));
+		expect(updated.activeLabel).toBe("migrate-work");
+		expect(updated.meta.keep).toBe(true);
+	});
+
+	test("does not migrate codex_quota_label when accountId mismatches", () => {
+		const activeAccountId = "acc_migrate_guard";
+		const payload = {
+			accounts: [
+				{
+					label: "guard-work",
+					accountId: activeAccountId,
+					access: createMockAccessToken(activeAccountId, "guard@example.com"),
+					refresh: "refresh-guard",
+					expires: Date.now() + 24 * 60 * 60 * 1000,
+				},
+			],
+		};
+		writeJsonFile(codexAccountsPath, payload);
+
+		const cliAuthPayload = {
+			codex_quota_label: "guard-work",
+			tokens: {
+				access_token: createMockAccessToken("acc_migrate_other", "guard@example.com"),
+				refresh_token: "refresh-guard",
+				expires_at: Math.floor((Date.now() + 3600 * 1000) / 1000),
+				account_id: "acc_migrate_other",
+			},
+		};
+		writeJsonFile(testAuthPath, cliAuthPayload);
+
+		const divergence = detectCodexDivergence();
+		expect(divergence.migrated).toBe(false);
+		expect(divergence.activeLabel ?? null).toBeNull();
+
+		const updated = JSON.parse(readFileSync(codexAccountsPath, "utf-8"));
+		expect(updated.activeLabel ?? null).toBeNull();
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sync command tests (Codex)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("handleCodexSync", () => {
+	const testDir = join(tmpdir(), "codex-sync-" + Date.now());
+	const testAuthPath = join(testDir, ".codex", "auth.json");
+	const opencodeAuthPath = join(testDir, "opencode", "auth.json");
+	const codexAccountsPath = MULTI_ACCOUNT_PATHS[0];
+	const opencodeAccountsPath = MULTI_ACCOUNT_PATHS[1];
+	let originalCodexAccountsEnv;
+	let originalCodexAuthPath;
+	let originalXdgDataHome;
+	let codexAccountsBackup;
+	let opencodeAccountsBackup;
+	let originalExit;
+	let exitCode;
+	let originalConsoleLog;
+	let originalConsoleError;
+	let consoleOutput;
+
+	beforeEach(() => {
+		originalCodexAccountsEnv = process.env.CODEX_ACCOUNTS;
+		originalCodexAuthPath = process.env.CODEX_AUTH_PATH;
+		originalXdgDataHome = process.env.XDG_DATA_HOME;
+		codexAccountsBackup = backupFileContents(codexAccountsPath);
+		opencodeAccountsBackup = backupFileContents(opencodeAccountsPath);
+		delete process.env.CODEX_ACCOUNTS;
+		process.env.CODEX_AUTH_PATH = testAuthPath;
+		process.env.XDG_DATA_HOME = testDir;
+		mkdirSync(dirname(testAuthPath), { recursive: true });
+		mkdirSync(dirname(opencodeAuthPath), { recursive: true });
+
+		originalExit = process.exit;
+		exitCode = null;
+		process.exit = (code) => {
+			exitCode = code;
+			throw new Error(`process.exit(${code})`);
+		};
+
+		originalConsoleLog = console.log;
+		originalConsoleError = console.error;
+		consoleOutput = { log: [], error: [] };
+		console.log = (...args) => consoleOutput.log.push(args.join(" "));
+		console.error = (...args) => consoleOutput.error.push(args.join(" "));
+	});
+
+	afterEach(() => {
+		process.exit = originalExit;
+		console.log = originalConsoleLog;
+		console.error = originalConsoleError;
+		if (originalCodexAccountsEnv === undefined) {
+			delete process.env.CODEX_ACCOUNTS;
+		} else {
+			process.env.CODEX_ACCOUNTS = originalCodexAccountsEnv;
+		}
+		if (originalCodexAuthPath === undefined) {
+			delete process.env.CODEX_AUTH_PATH;
+		} else {
+			process.env.CODEX_AUTH_PATH = originalCodexAuthPath;
+		}
+		if (originalXdgDataHome === undefined) {
+			delete process.env.XDG_DATA_HOME;
+		} else {
+			process.env.XDG_DATA_HOME = originalXdgDataHome;
+		}
+		restoreFileContents(codexAccountsPath, codexAccountsBackup);
+		restoreFileContents(opencodeAccountsPath, opencodeAccountsBackup);
+		rmSync(testDir, { recursive: true, force: true });
+	});
+
+	test("sync pushes activeLabel tokens to existing CLI stores", async () => {
+		const activeLabel = "sync-work";
+		const accountId = "acc_sync_work";
+		const accessToken = createMockAccessToken(accountId, "sync@example.com");
+		const refreshToken = "refresh-sync-work";
+		const expiresAt = Date.now() + 24 * 60 * 60 * 1000;
+
+		writeJsonFile(codexAccountsPath, {
+			schemaVersion: 4,
+			activeLabel,
+			meta: { keep: true },
+			accounts: [
+				{
+					label: activeLabel,
+					accountId,
+					access: accessToken,
+					refresh: refreshToken,
+					expires: expiresAt,
+					idToken: "id-sync-work",
+				},
+			],
+		});
+
+		writeJsonFile(testAuthPath, {
+			metaRoot: true,
+			tokens: {
+				access_token: "old_access",
+				refresh_token: "old_refresh",
+				account_id: "old_account",
+				expires_at: Math.floor((Date.now() + 1000) / 1000),
+			},
+		});
+
+		writeJsonFile(opencodeAuthPath, {
+			openai: {
+				type: "oauth",
+				access: "old_access",
+				refresh: "old_refresh",
+				expires: 123,
+				accountId: "old_account",
+				extra: "keep-openai",
+			},
+			anthropic: {
+				type: "api",
+				key: "anthropic-key",
+			},
+		});
+
+		await handleCodexSync([], { json: true, dryRun: false });
+
+		expect(exitCode).toBeNull();
+		const jsonEntry = consoleOutput.log.find(entry => entry.startsWith("{"));
+		expect(jsonEntry).toBeDefined();
+		const output = JSON.parse(jsonEntry);
+		expect(output.success).toBe(true);
+		expect(output.activeLabel).toBe(activeLabel);
+		expect(output.updated).toContain(testAuthPath);
+		expect(output.updated).toContain(opencodeAuthPath);
+
+		const updatedAuth = JSON.parse(readFileSync(testAuthPath, "utf-8"));
+		expect(updatedAuth.metaRoot).toBe(true);
+		expect(updatedAuth.codex_quota_label).toBe(activeLabel);
+		expect(updatedAuth.tokens.access_token).toBe(accessToken);
+		expect(updatedAuth.tokens.refresh_token).toBe(refreshToken);
+		expect(updatedAuth.tokens.account_id).toBe(accountId);
+		expect(updatedAuth.tokens.id_token).toBe("id-sync-work");
+
+		const updatedOpencode = JSON.parse(readFileSync(opencodeAuthPath, "utf-8"));
+		expect(updatedOpencode.anthropic).toEqual({
+			type: "api",
+			key: "anthropic-key",
+		});
+		expect(updatedOpencode.openai.access).toBe(accessToken);
+		expect(updatedOpencode.openai.refresh).toBe(refreshToken);
+		expect(updatedOpencode.openai.accountId).toBe(accountId);
+		expect(updatedOpencode.openai.extra).toBe("keep-openai");
+
+		const accounts = loadAllAccountsNoDedup();
+		expect(accounts.some(a => a.label === activeLabel && a.accountId === accountId)).toBe(true);
+	});
+
+	test("--dry-run performs no writes", async () => {
+		const activeLabel = "sync-dry-run";
+		const accountId = "acc_sync_dry_run";
+		const accessToken = createMockAccessToken(accountId, "dryrun@example.com");
+		const refreshToken = "refresh-dry-run";
+		const expiresAt = Date.now() + 24 * 60 * 60 * 1000;
+
+		writeJsonFile(codexAccountsPath, {
+			activeLabel,
+			accounts: [
+				{
+					label: activeLabel,
+					accountId,
+					access: accessToken,
+					refresh: refreshToken,
+					expires: expiresAt,
+				},
+			],
+		});
+
+		writeJsonFile(testAuthPath, {
+			tokens: {
+				access_token: "old_access_dry",
+				refresh_token: "old_refresh_dry",
+				account_id: "old_account_dry",
+				expires_at: Math.floor((Date.now() + 1000) / 1000),
+			},
+		});
+		writeJsonFile(opencodeAuthPath, {
+			openai: {
+				type: "oauth",
+				access: "old_access_dry",
+				refresh: "old_refresh_dry",
+				expires: 123,
+				accountId: "old_account_dry",
+			},
+		});
+
+		const authBefore = readFileSync(testAuthPath, "utf-8");
+		const opencodeBefore = readFileSync(opencodeAuthPath, "utf-8");
+
+		await handleCodexSync([], { json: true, dryRun: true });
+
+		expect(exitCode).toBeNull();
+		const authAfter = readFileSync(testAuthPath, "utf-8");
+		const opencodeAfter = readFileSync(opencodeAuthPath, "utf-8");
+		expect(authAfter).toBe(authBefore);
+		expect(opencodeAfter).toBe(opencodeBefore);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sync command tests (Claude)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("handleClaudeSync", () => {
+	const testDir = join(tmpdir(), "claude-sync-" + Date.now());
+	const credentialsPath = join(testDir, ".claude", ".credentials.json");
+	const opencodeAuthPath = join(testDir, "opencode", "auth.json");
+	const claudeAccountsPath = CLAUDE_MULTI_ACCOUNT_PATHS[0];
+	let originalClaudeAccountsEnv;
+	let originalClaudeCredentialsPath;
+	let originalXdgDataHome;
+	let claudeAccountsBackup;
+	let originalExit;
+	let exitCode;
+	let originalConsoleLog;
+	let originalConsoleError;
+	let consoleOutput;
+
+	beforeEach(() => {
+		originalClaudeAccountsEnv = process.env.CLAUDE_ACCOUNTS;
+		originalClaudeCredentialsPath = process.env.CLAUDE_CREDENTIALS_PATH;
+		originalXdgDataHome = process.env.XDG_DATA_HOME;
+		claudeAccountsBackup = backupFileContents(claudeAccountsPath);
+		delete process.env.CLAUDE_ACCOUNTS;
+		process.env.CLAUDE_CREDENTIALS_PATH = credentialsPath;
+		process.env.XDG_DATA_HOME = testDir;
+		mkdirSync(dirname(credentialsPath), { recursive: true });
+		mkdirSync(dirname(opencodeAuthPath), { recursive: true });
+
+		originalExit = process.exit;
+		exitCode = null;
+		process.exit = (code) => {
+			exitCode = code;
+			throw new Error(`process.exit(${code})`);
+		};
+
+		originalConsoleLog = console.log;
+		originalConsoleError = console.error;
+		consoleOutput = { log: [], error: [] };
+		console.log = (...args) => consoleOutput.log.push(args.join(" "));
+		console.error = (...args) => consoleOutput.error.push(args.join(" "));
+	});
+
+	afterEach(() => {
+		process.exit = originalExit;
+		console.log = originalConsoleLog;
+		console.error = originalConsoleError;
+		if (originalClaudeAccountsEnv === undefined) {
+			delete process.env.CLAUDE_ACCOUNTS;
+		} else {
+			process.env.CLAUDE_ACCOUNTS = originalClaudeAccountsEnv;
+		}
+		if (originalClaudeCredentialsPath === undefined) {
+			delete process.env.CLAUDE_CREDENTIALS_PATH;
+		} else {
+			process.env.CLAUDE_CREDENTIALS_PATH = originalClaudeCredentialsPath;
+		}
+		if (originalXdgDataHome === undefined) {
+			delete process.env.XDG_DATA_HOME;
+		} else {
+			process.env.XDG_DATA_HOME = originalXdgDataHome;
+		}
+		restoreFileContents(claudeAccountsPath, claudeAccountsBackup);
+		rmSync(testDir, { recursive: true, force: true });
+	});
+
+	test("sync pushes OAuth tokens to existing stores", async () => {
+		const activeLabel = "claude-sync-work";
+		const oauthToken = "oauth_token_sync";
+		const oauthRefreshToken = "oauth_refresh_sync";
+		const oauthExpiresAt = Date.now() + 24 * 60 * 60 * 1000;
+
+		writeJsonFile(claudeAccountsPath, {
+			schemaVersion: 2,
+			activeLabel,
+			meta: { keep: true },
+			accounts: [
+				{
+					label: activeLabel,
+					oauthToken,
+					oauthRefreshToken,
+					oauthExpiresAt,
+				},
+			],
+		});
+
+		writeJsonFile(credentialsPath, {
+			metaRoot: true,
+			claude_ai_oauth: {
+				accessToken: "old_access",
+				refreshToken: "old_refresh",
+				expiresAt: 123,
+			},
+		});
+		writeJsonFile(opencodeAuthPath, {
+			anthropic: {
+				type: "oauth",
+				access: "old_access",
+				refresh: "old_refresh",
+				expires: 123,
+				extra: "keep-anthropic",
+			},
+			openai: {
+				type: "api",
+				key: "openai-key",
+			},
+		});
+
+		await handleClaudeSync([], { json: true, dryRun: false });
+
+		expect(exitCode).toBeNull();
+		const jsonEntry = consoleOutput.log.find(entry => entry.startsWith("{"));
+		expect(jsonEntry).toBeDefined();
+		const output = JSON.parse(jsonEntry);
+		expect(output.success).toBe(true);
+		expect(output.activeLabel).toBe(activeLabel);
+		expect(output.updated).toContain(credentialsPath);
+		expect(output.updated).toContain(opencodeAuthPath);
+
+		const updatedCredentials = JSON.parse(readFileSync(credentialsPath, "utf-8"));
+		expect(updatedCredentials.metaRoot).toBe(true);
+		expect(updatedCredentials.claudeAiOauth.accessToken).toBe(oauthToken);
+		expect(updatedCredentials.claudeAiOauth.refreshToken).toBe(oauthRefreshToken);
+		expect(updatedCredentials.claudeAiOauth.expiresAt).toBe(oauthExpiresAt);
+		expect(updatedCredentials.claude_ai_oauth).toBeUndefined();
+
+		const updatedOpencode = JSON.parse(readFileSync(opencodeAuthPath, "utf-8"));
+		expect(updatedOpencode.openai).toEqual({
+			type: "api",
+			key: "openai-key",
+		});
+		expect(updatedOpencode.anthropic.access).toBe(oauthToken);
+		expect(updatedOpencode.anthropic.refresh).toBe(oauthRefreshToken);
+		expect(updatedOpencode.anthropic.expires).toBe(oauthExpiresAt);
+		expect(updatedOpencode.anthropic.extra).toBe("keep-anthropic");
+
+		const divergence = detectClaudeDivergence();
+		expect(divergence.skipped).toBe(false);
+		expect(divergence.diverged).toBe(false);
+		expect(divergence.activeLabel).toBe(activeLabel);
+	});
+
+	test("session-key-only active account is skipped with a warning", async () => {
+		const activeLabel = "claude-session-only";
+		writeJsonFile(claudeAccountsPath, {
+			activeLabel,
+			accounts: [
+				{
+					label: activeLabel,
+					sessionKey: "sk-ant-session-only",
+				},
+			],
+		});
+
+		expect(existsSync(credentialsPath)).toBe(false);
+
+		await handleClaudeSync([], { json: true, dryRun: false });
+
+		expect(exitCode).toBeNull();
+		const jsonEntry = consoleOutput.log.find(entry => entry.startsWith("{"));
+		expect(jsonEntry).toBeDefined();
+		const output = JSON.parse(jsonEntry);
+		expect(output.success).toBe(true);
+		expect(output.updated).toEqual([]);
+		expect(output.warnings.join(" ")).toContain("no OAuth tokens");
+		expect(existsSync(credentialsPath)).toBe(false);
+
+		const divergence = detectClaudeDivergence();
+		expect(divergence.skipped).toBe(true);
+		expect(divergence.skipReason).toBe("active-account-not-oauth");
 	});
 });
 

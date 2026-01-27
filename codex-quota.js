@@ -87,6 +87,7 @@ const MULTI_ACCOUNT_PATHS = [
 const CODEX_CLI_AUTH_PATH = join(homedir(), ".codex", "auth.json");
 const PI_AUTH_PATH = join(homedir(), ".pi", "agent", "auth.json");
 const DEFAULT_XDG_DATA_HOME = join(homedir(), ".local", "share");
+const MULTI_ACCOUNT_SCHEMA_VERSION = 1;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Color output
@@ -213,11 +214,12 @@ function getCodexCliAuthPath() {
 }
 
 /**
- * Resolve pi auth.json path.
+ * Resolve pi auth.json path with optional override.
  * @returns {string}
  */
 function getPiAuthPath() {
-	return PI_AUTH_PATH;
+	const override = process.env.PI_AUTH_PATH;
+	return override ? override : PI_AUTH_PATH;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -271,6 +273,145 @@ function writeFileAtomic(filePath, contents, options = {}) {
 	return targetPath;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Multi-account container helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Read a multi-account container while preserving root shape and fields.
+ * Supports both array roots and object roots with an accounts field.
+ * @param {string} filePath - Path to the multi-account JSON file
+ * @returns {{
+ * 	filePath: string,
+ * 	exists: boolean,
+ * 	rootType: "missing" | "array" | "object" | "invalid",
+ * 	rootFields: Record<string, unknown>,
+ * 	schemaVersion: number,
+ * 	activeLabel: string | null,
+ * 	accounts: unknown[],
+ * }}
+ */
+function readMultiAccountContainer(filePath) {
+	const container = {
+		filePath,
+		exists: existsSync(filePath),
+		rootType: "missing",
+		rootFields: {},
+		schemaVersion: 0,
+		activeLabel: null,
+		accounts: [],
+	};
+	if (!container.exists) {
+		return container;
+	}
+
+	try {
+		const raw = readFileSync(filePath, "utf-8");
+		const parsed = JSON.parse(raw);
+
+		if (Array.isArray(parsed)) {
+			container.rootType = "array";
+			container.accounts = parsed;
+			return container;
+		}
+
+		if (!parsed || typeof parsed !== "object") {
+			container.rootType = "invalid";
+			return container;
+		}
+
+		container.rootType = "object";
+		const accounts = Array.isArray(parsed.accounts) ? parsed.accounts : [];
+		container.accounts = accounts;
+		container.schemaVersion = typeof parsed.schemaVersion === "number" ? parsed.schemaVersion : 0;
+		container.activeLabel = typeof parsed.activeLabel === "string"
+			? parsed.activeLabel
+			: parsed.activeLabel === null
+				? null
+				: null;
+
+		for (const [key, value] of Object.entries(parsed)) {
+			if (key === "accounts" || key === "schemaVersion" || key === "activeLabel") {
+				continue;
+			}
+			container.rootFields[key] = value;
+		}
+	} catch {
+		container.rootType = "invalid";
+	}
+
+	return container;
+}
+
+/**
+ * Build a container payload that preserves root fields while merging markers.
+ * @param {ReturnType<typeof readMultiAccountContainer>} container
+ * @param {unknown[]} accounts - Raw accounts array to persist
+ * @param {{ activeLabel?: string | null, schemaVersion?: number }} [overrides]
+ * @returns {Record<string, unknown>}
+ */
+function buildMultiAccountPayload(container, accounts, overrides = {}) {
+	const schemaVersionFromContainer = typeof container.schemaVersion === "number"
+		? container.schemaVersion
+		: 0;
+	const schemaVersionOverride = typeof overrides.schemaVersion === "number"
+		? overrides.schemaVersion
+		: 0;
+	const schemaVersion = Math.max(
+		schemaVersionFromContainer,
+		schemaVersionOverride,
+		MULTI_ACCOUNT_SCHEMA_VERSION,
+	);
+
+	const activeLabelCandidate = overrides.activeLabel !== undefined
+		? overrides.activeLabel
+		: container.activeLabel;
+	const activeLabel = typeof activeLabelCandidate === "string" && activeLabelCandidate
+		? activeLabelCandidate
+		: null;
+
+	return {
+		...container.rootFields,
+		schemaVersion,
+		activeLabel,
+		accounts,
+	};
+}
+
+/**
+ * Write a multi-account container while preserving root fields and markers.
+ * @param {string} filePath - Path to write
+ * @param {ReturnType<typeof readMultiAccountContainer>} container - Container metadata
+ * @param {unknown[]} accounts - Raw accounts array to persist
+ * @param {{ activeLabel?: string | null, schemaVersion?: number }} [overrides]
+ * @param {{ mode?: number }} [options]
+ * @returns {{ path: string, payload: Record<string, unknown> }}
+ */
+function writeMultiAccountContainer(filePath, container, accounts, overrides = {}, options = {}) {
+	const payload = buildMultiAccountPayload(container, accounts, overrides);
+	const mode = options.mode ?? 0o600;
+	const path = writeFileAtomic(filePath, JSON.stringify(payload, null, 2) + "\n", { mode });
+	return { path, payload };
+}
+
+/**
+ * Map over container accounts while tracking whether anything changed.
+ * @param {ReturnType<typeof readMultiAccountContainer>} container
+ * @param {(entry: unknown, index: number) => unknown} mapper
+ * @returns {{ updated: boolean, accounts: unknown[] }}
+ */
+function mapContainerAccounts(container, mapper) {
+	let updated = false;
+	const accounts = container.accounts.map((entry, index) => {
+		const nextEntry = mapper(entry, index);
+		if (nextEntry !== entry) {
+			updated = true;
+		}
+		return nextEntry;
+	});
+	return { updated, accounts };
+}
+
 /**
  * Load accounts from CODEX_ACCOUNTS environment variable
  * @returns {Array<{label: string, accountId: string, access: string, refresh: string, expires?: number, source: string}>}
@@ -297,19 +438,11 @@ function loadAccountsFromEnv() {
  * @returns {Array<{label: string, accountId: string, access: string, refresh: string, expires?: number, source: string}>}
  */
 function loadAccountsFromFile(filePath) {
-	if (!existsSync(filePath)) return [];
-	
-	try {
-		const raw = readFileSync(filePath, "utf-8");
-		const parsed = JSON.parse(raw);
-		const accounts = Array.isArray(parsed) ? parsed : parsed?.accounts ?? [];
-		return accounts
-			.filter(isValidAccount)
-			.map(a => ({ ...a, source: filePath }));
-	} catch {
-		// Invalid JSON or read error - silently return empty array
-		return [];
-	}
+	const container = readMultiAccountContainer(filePath);
+	if (!container.exists) return [];
+	return container.accounts
+		.filter(isValidAccount)
+		.map(a => ({ ...a, source: filePath }));
 }
 
 /**
@@ -330,7 +463,9 @@ function loadAccountFromCodexCli() {
 			return [];
 		}
 		
-		const accountId = extractAccountId(tokens.access_token);
+		const accountId = typeof tokens.account_id === "string" && tokens.account_id
+			? tokens.account_id
+			: extractAccountId(tokens.access_token);
 		if (!accountId) {
 			return [];
 		}
@@ -350,22 +485,31 @@ function loadAccountFromCodexCli() {
 }
 
 /**
- * Deduplicate accounts by email (from JWT token), keeping the first occurrence
- * This handles the case where the same account is sourced from multiple files
- * (e.g., codex-accounts.json and opencode both storing the same credentials)
- * 
- * Note: We use email instead of accountId because a team account has one accountId
- * but multiple users (each with their own email). We want to show each user once.
- * @param {Array<{access: string, ...}>} accounts - Array of accounts with JWT access tokens
- * @returns {Array<{access: string, ...}>} Deduplicated accounts
+ * Deduplicate accounts by email (from JWT token), keeping the first occurrence.
+ * Optionally prefer a specific label so the active account remains visible.
+ * @param {Array<{access: string, label?: string}>} accounts - Array of accounts with JWT access tokens
+ * @param {{ preferredLabel?: string | null }} [options]
+ * @returns {Array<{access: string, label?: string}>} Deduplicated accounts
  */
-function deduplicateAccountsByEmail(accounts) {
+function deduplicateAccountsByEmail(accounts, options = {}) {
+	const preferredLabel = options.preferredLabel ?? null;
+	let preferredEmail = null;
+	if (preferredLabel) {
+		const preferredAccount = accounts.find(account => account.label === preferredLabel);
+		if (preferredAccount?.access) {
+			preferredEmail = extractProfile(preferredAccount.access)?.email ?? null;
+		}
+	}
+
 	const seen = new Set();
 	return accounts.filter(account => {
-		if (!account.access) return true; // Keep accounts without token (shouldn't happen)
+		if (!account.access) return true;
 		const profile = extractProfile(account.access);
 		const email = profile?.email;
-		if (!email) return true; // Keep accounts without email (fallback)
+		if (!email) return true;
+		if (preferredEmail && email === preferredEmail) {
+			return account.label === preferredLabel;
+		}
 		if (seen.has(email)) return false;
 		seen.add(email);
 		return true;
@@ -373,30 +517,67 @@ function deduplicateAccountsByEmail(accounts) {
 }
 
 /**
- * Load ALL accounts from ALL sources (env, file paths, codex-cli)
- * Each account includes a `source` property indicating its origin
- * Deduplicates by email to prevent showing same user twice
+ * Resolve the multi-account file that stores activeLabel for Codex.
+ * Active label is stored only in the first existing path in precedence order.
+ * @returns {string}
+ */
+function resolveCodexActiveStorePath() {
+	for (const path of MULTI_ACCOUNT_PATHS) {
+		if (existsSync(path)) return path;
+	}
+	return MULTI_ACCOUNT_PATHS[0];
+}
+
+/**
+ * Read the active-label store container for Codex.
+ * @returns {{ path: string, container: ReturnType<typeof readMultiAccountContainer> }}
+ */
+function readCodexActiveStoreContainer() {
+	const path = resolveCodexActiveStorePath();
+	const container = readMultiAccountContainer(path);
+	return { path, container };
+}
+
+/**
+ * Get the activeLabel stored for Codex (if any).
+ * @returns {{ activeLabel: string | null, path: string, schemaVersion: number }}
+ */
+function getCodexActiveLabelInfo() {
+	const { path, container } = readCodexActiveStoreContainer();
+	return {
+		activeLabel: container.activeLabel ?? null,
+		path,
+		schemaVersion: container.schemaVersion ?? 0,
+	};
+}
+
+/**
+ * Load ALL accounts from ALL sources without deduplication by email.
+ * This is the source for label resolution and active label workflows.
  * @returns {Array<{label: string, accountId: string, access: string, refresh: string, expires?: number, source: string}>}
  */
-function loadAllAccounts() {
+function loadAllAccountsNoDedup() {
 	const all = [];
-	
-	// 1. Load from environment variable
 	all.push(...loadAccountsFromEnv());
-	
-	// 2. Load from multi-account file paths
 	for (const path of MULTI_ACCOUNT_PATHS) {
 		all.push(...loadAccountsFromFile(path));
 	}
-	
-	// 3. Only load codex-cli synthetic account if no other accounts exist
-	// (prevents duplicate entries when user has multi-account file)
 	if (all.length === 0) {
 		all.push(...loadAccountFromCodexCli());
 	}
-	
-	// 4. Deduplicate by email (same user from multiple sources)
-	return deduplicateAccountsByEmail(all);
+	return all;
+}
+
+/**
+ * Load ALL accounts from ALL sources (env, file paths, codex-cli)
+ * Each account includes a `source` property indicating its origin
+ * Deduplicates by email to prevent showing same user twice
+ * @param {string | null} [preferredLabel] - Optional label to preserve during dedup
+ * @returns {Array<{label: string, accountId: string, access: string, refresh: string, expires?: number, source: string}>}
+ */
+function loadAllAccounts(preferredLabel = null) {
+	const all = loadAllAccountsNoDedup();
+	return deduplicateAccountsByEmail(all, { preferredLabel });
 }
 
 /**
@@ -405,7 +586,7 @@ function loadAllAccounts() {
  * @returns {{label: string, accountId: string, access: string, refresh: string, expires?: number, source: string} | null}
  */
 function findAccountByLabel(label) {
-	const accounts = loadAllAccounts();
+	const accounts = loadAllAccountsNoDedup();
 	return accounts.find(a => a.label === label) ?? null;
 }
 
@@ -414,7 +595,7 @@ function findAccountByLabel(label) {
  * @returns {string[]} Array of all unique labels
  */
 function getAllLabels() {
-	const accounts = loadAllAccounts();
+	const accounts = loadAllAccountsNoDedup();
 	return [...new Set(accounts.map(a => a.label))];
 }
 
@@ -803,12 +984,12 @@ function persistOpenAiOAuthTokens(account, previousTokens = {}) {
 	for (const path of MULTI_ACCOUNT_PATHS) {
 		if (!existsSync(path)) continue;
 		try {
-			const raw = readFileSync(path, "utf-8");
-			const parsed = JSON.parse(raw);
-			const isArray = Array.isArray(parsed);
-			const accounts = isArray ? parsed : parsed?.accounts ?? [];
-			let updated = false;
-			const updatedAccounts = accounts.map(entry => {
+			const container = readMultiAccountContainer(path);
+			if (container.rootType === "invalid") {
+				errors.push(`Failed to parse ${path}`);
+				continue;
+			}
+			const mapped = mapContainerAccounts(container, (entry) => {
 				if (!entry || typeof entry !== "object") return entry;
 				const stored = normalizeOpenAiOauthEntryTokens(entry);
 				const matches = isOpenAiOauthTokenMatch({
@@ -820,13 +1001,11 @@ function persistOpenAiOAuthTokens(account, previousTokens = {}) {
 					storedLabel: entry?.label ?? null,
 				});
 				if (!matches) return entry;
-				updated = true;
 				return updateOpenAiOauthEntry({ ...entry }, account);
 			});
 
-			if (updated) {
-				const nextPayload = isArray ? updatedAccounts : { ...parsed, accounts: updatedAccounts };
-				writeFileAtomic(path, JSON.stringify(nextPayload, null, 2) + "\n", { mode: 0o600 });
+			if (mapped.updated) {
+				writeMultiAccountContainer(path, container, mapped.accounts, {}, { mode: 0o600 });
 				updatedPaths.push(path);
 			}
 		} catch (err) {
@@ -1166,12 +1345,12 @@ function persistClaudeOAuthTokens(account, previousTokens = {}) {
 		for (const path of CLAUDE_MULTI_ACCOUNT_PATHS) {
 			if (!existsSync(path)) continue;
 			try {
-				const raw = readFileSync(path, "utf-8");
-				const parsed = JSON.parse(raw);
-				const isArray = Array.isArray(parsed);
-				const accounts = isArray ? parsed : parsed?.accounts ?? [];
-				let updated = false;
-				const updatedAccounts = accounts.map(entry => {
+				const container = readMultiAccountContainer(path);
+				if (container.rootType === "invalid") {
+					errors.push(`Failed to parse ${path}`);
+					continue;
+				}
+				const mapped = mapContainerAccounts(container, (entry) => {
 					if (!entry || typeof entry !== "object") return entry;
 					const stored = normalizeClaudeOauthEntryTokens(entry);
 					const matches = isClaudeOauthTokenMatch({
@@ -1183,14 +1362,12 @@ function persistClaudeOAuthTokens(account, previousTokens = {}) {
 						storedLabel: entry?.label ?? null,
 					});
 					if (!matches) return entry;
-					updated = true;
 					const scopes = account.scopes ?? stored.scopes ?? null;
 					return updateClaudeOauthEntry({ ...entry }, { ...account, scopes });
 				});
 
-				if (updated) {
-					const nextPayload = isArray ? updatedAccounts : { ...parsed, accounts: updatedAccounts };
-					writeFileAtomic(path, JSON.stringify(nextPayload, null, 2) + "\n", { mode: 0o600 });
+				if (mapped.updated) {
+					writeMultiAccountContainer(path, container, mapped.accounts, {}, { mode: 0o600 });
 					updatedPaths.push(path);
 				}
 			} catch (err) {
@@ -1368,18 +1545,11 @@ function loadClaudeAccountsFromEnv() {
 }
 
 function loadClaudeAccountsFromFile(filePath) {
-	if (!existsSync(filePath)) return [];
-
-	try {
-		const raw = readFileSync(filePath, "utf-8");
-		const parsed = JSON.parse(raw);
-		const accounts = Array.isArray(parsed) ? parsed : parsed?.accounts ?? [];
-		return accounts
-			.map(a => normalizeClaudeAccount(a, filePath))
-			.filter(a => a && isValidClaudeAccount(a));
-	} catch {
-		return [];
-	}
+	const container = readMultiAccountContainer(filePath);
+	if (!container.exists) return [];
+	return container.accounts
+		.map(a => normalizeClaudeAccount(a, filePath))
+		.filter(a => a && isValidClaudeAccount(a));
 }
 
 function loadClaudeAccounts() {
@@ -1391,14 +1561,50 @@ function loadClaudeAccounts() {
 	return all;
 }
 
+/**
+ * Resolve the multi-account file that stores activeLabel for Claude.
+ * @returns {string}
+ */
+function resolveClaudeActiveStorePath() {
+	const firstPath = CLAUDE_MULTI_ACCOUNT_PATHS[0];
+	if (firstPath && existsSync(firstPath)) return firstPath;
+	return firstPath;
+}
+
+/**
+ * Read the active-label store container for Claude.
+ * @returns {{ path: string, container: ReturnType<typeof readMultiAccountContainer> }}
+ */
+function readClaudeActiveStoreContainer() {
+	const path = resolveClaudeActiveStorePath();
+	const container = readMultiAccountContainer(path);
+	return { path, container };
+}
+
+/**
+ * Get the activeLabel stored for Claude (if any).
+ * @returns {{ activeLabel: string | null, path: string, schemaVersion: number }}
+ */
+function getClaudeActiveLabelInfo() {
+	const { path, container } = readClaudeActiveStoreContainer();
+	return {
+		activeLabel: container.activeLabel ?? null,
+		path,
+		schemaVersion: container.schemaVersion ?? 0,
+	};
+}
+
 function saveClaudeAccounts(accounts) {
-	const targetPath = CLAUDE_MULTI_ACCOUNT_PATHS[0];
-	const dir = dirname(targetPath);
-	if (!existsSync(dir)) {
-		mkdirSync(dir, { recursive: true });
-	}
-	writeFileAtomic(targetPath, JSON.stringify({ accounts }, null, 2) + "\n", { mode: 0o600 });
-	return targetPath;
+	const targetPath = resolveClaudeActiveStorePath();
+	const container = readMultiAccountContainer(targetPath);
+	const filtered = accounts.filter(account => !(account?.source && account.source.startsWith("env")));
+	const sanitized = filtered.map(account => {
+		if (!account || typeof account !== "object") return account;
+		const { source, ...rest } = account;
+		return rest;
+	});
+	const result = writeMultiAccountContainer(targetPath, container, sanitized, {}, { mode: 0o600 });
+	return result.path;
 }
 
 function loadClaudeSessionFromCredentials() {
@@ -2807,6 +3013,7 @@ Namespaces:
 
 Options:
   --json            Output in JSON format
+  --dry-run         Preview sync without writing files
   --no-browser      Print auth URL instead of opening browser
   --no-color        Disable colored output
   --version, -v     Show version number
@@ -2822,6 +3029,9 @@ Examples:
   ${PRIMARY_CMD} claude add work   Add Claude credential with label "work"
   ${PRIMARY_CMD} codex switch work Switch Codex/OpenCode/pi to "work"
   ${PRIMARY_CMD} claude switch work Switch Claude Code/OpenCode/pi to "work"
+  ${PRIMARY_CMD} codex sync        Sync active Codex account to CLI auth files
+  ${PRIMARY_CMD} codex sync --dry-run  Preview Codex sync without writing
+  ${PRIMARY_CMD} claude sync --dry-run Preview Claude sync without writing
 
 Account sources (checked in order):
   1. CODEX_ACCOUNTS env var (JSON array)
@@ -2830,9 +3040,11 @@ Account sources (checked in order):
   4. ~/.codex/auth.json (Codex CLI format)
 
 OpenCode & pi Integration:
-  The 'switch' command updates Codex CLI (~/.codex/auth.json) plus
+  The 'switch' and 'sync' commands update Codex CLI (~/.codex/auth.json) plus
   OpenCode (~/.local/share/opencode/auth.json) and pi (~/.pi/agent/auth.json)
   authentication files when they exist, enabling seamless account switching.
+  The activeLabel marker in multi-account files is used for sync and divergence
+  warnings in list/quota output.
 
 Run '${PRIMARY_CMD} <namespace> <command> --help' for help on a specific command.
 `);
@@ -2848,11 +3060,13 @@ Commands:
   quota [label]     Check usage quota (default command)
   add [label]       Add a new account via OAuth browser flow
   switch <label>    Switch active account for Codex CLI, OpenCode, and pi
+  sync              Sync activeLabel to Codex CLI, OpenCode, and pi
   list              List all accounts from all sources
   remove <label>    Remove an account from storage
 
 Options:
   --json            Output in JSON format
+  --dry-run         Preview sync without writing files
   --no-browser      Print auth URL instead of opening browser
   --no-color        Disable colored output
   --help, -h        Show this help
@@ -2864,6 +3078,12 @@ Examples:
   ${PRIMARY_CMD} codex switch personal   Switch to "personal" account
   ${PRIMARY_CMD} codex list              List all configured accounts
   ${PRIMARY_CMD} codex remove old        Remove "old" account
+  ${PRIMARY_CMD} codex sync              Sync the activeLabel account
+  ${PRIMARY_CMD} codex sync --dry-run    Preview sync without writing
+
+Notes:
+  - switch and sync update activeLabel in ~/.codex-accounts.json when available
+  - list/quota warn when CLI auth diverges (use '${PRIMARY_CMD} codex sync')
 `);
 }
 
@@ -2877,11 +3097,13 @@ Commands:
   quota [label]     Check Claude usage (default command)
   add [label]       Add a Claude credential (via OAuth or manual entry)
   switch <label>    Switch Claude Code, OpenCode, and pi credentials
+  sync              Sync activeLabel to Claude Code, OpenCode, and pi
   list              List Claude credentials
   remove <label>    Remove a Claude credential from storage
 
 Options:
   --json            Output result in JSON format
+  --dry-run         Preview sync without writing files
   --oauth           Use OAuth browser authentication (recommended)
   --manual          Use manual token entry
   --no-browser      Print OAuth URL instead of opening browser
@@ -2895,6 +3117,12 @@ Examples:
   ${PRIMARY_CMD} claude switch work       Switch Claude Code/OpenCode/pi to "work"
   ${PRIMARY_CMD} claude list              List Claude credentials
   ${PRIMARY_CMD} claude remove old        Remove Claude credential "old"
+  ${PRIMARY_CMD} claude sync              Sync the activeLabel account
+  ${PRIMARY_CMD} claude sync --dry-run    Preview sync without writing
+
+Notes:
+  - switch and sync update activeLabel in ~/.claude-accounts.json when available
+  - session-key-only accounts cannot be synced (OAuth required)
 `);
 }
 
@@ -2955,10 +3183,45 @@ Description:
   OpenCode (~/.local/share/opencode/auth.json) plus pi (~/.pi/agent/auth.json).
 
   Requires an OAuth-based Claude credential (add with --oauth).
+  Also updates activeLabel in ~/.claude-accounts.json when available.
 
 Examples:
   ${PRIMARY_CMD} claude switch work
   ${PRIMARY_CMD} claude switch work --json
+
+See also:
+  ${PRIMARY_CMD} claude sync
+`);
+}
+
+function printHelpClaudeSync() {
+	console.log(`${PRIMARY_CMD} claude sync - Sync activeLabel to Claude auth files
+
+Usage:
+  ${PRIMARY_CMD} claude sync [options]
+
+Options:
+  --dry-run         Preview what would be synced without writing files
+  --json            Output result in JSON format
+  --help, -h        Show this help
+
+Description:
+  Pushes the activeLabel Claude account from ~/.claude-accounts.json to:
+  - Claude Code (~/.claude/.credentials.json)
+  - OpenCode (~/.local/share/opencode/auth.json) when present
+  - pi (~/.pi/agent/auth.json) when present
+
+  Only OAuth-based accounts can be synced. Session-key-only accounts are
+  skipped with a warning.
+
+Examples:
+  ${PRIMARY_CMD} claude sync
+  ${PRIMARY_CMD} claude sync --dry-run
+  ${PRIMARY_CMD} claude sync --json
+
+See also:
+  ${PRIMARY_CMD} claude switch <label>
+  ${PRIMARY_CMD} claude list
 `);
 }
 
@@ -2974,6 +3237,8 @@ Options:
 
 Description:
   Lists Claude credentials stored in CLAUDE_ACCOUNTS or ~/.claude-accounts.json.
+  The activeLabel account is marked with '*'.
+  OAuth-based accounts are checked for divergence in Claude CLI stores.
 
 Examples:
   ${PRIMARY_CMD} claude list
@@ -3021,6 +3286,7 @@ Description:
   Displays usage statistics for Claude accounts. Tokens are refreshed when
   available. Uses OAuth credentials when possible and falls back to legacy
   session credentials.
+  OAuth-based accounts are checked for divergence in Claude CLI stores.
 
 Examples:
   ${PRIMARY_CMD} claude quota
@@ -3087,6 +3353,8 @@ Description:
   
   The OpenCode auth file location respects XDG_DATA_HOME if set.
   If the optional auth files don't exist, only the Codex CLI file is updated.
+
+  Also updates activeLabel in your multi-account file when available.
   
   If the token is expired, it will be refreshed before switching.
   Any existing OPENAI_API_KEY in auth.json is preserved.
@@ -3097,6 +3365,38 @@ Examples:
 
 See also:
   ${PRIMARY_CMD} codex list    Show all available accounts and their labels
+  ${PRIMARY_CMD} codex sync    Re-sync activeLabel to CLI auth files
+`);
+}
+
+function printHelpCodexSync() {
+	console.log(`${PRIMARY_CMD} codex sync - Sync activeLabel to CLI auth files
+
+Usage:
+  ${PRIMARY_CMD} codex sync [options]
+
+Options:
+  --dry-run         Preview what would be synced without writing files
+  --json            Output result in JSON format
+  --help, -h        Show this help
+
+Description:
+  Pushes the activeLabel account from your multi-account file to:
+  - Codex CLI (~/.codex/auth.json)
+  - OpenCode (~/.local/share/opencode/auth.json) when present
+  - pi (~/.pi/agent/auth.json) when present
+
+  This is useful after a native CLI login has diverged from the tracked
+  activeLabel account.
+
+Examples:
+  ${PRIMARY_CMD} codex sync
+  ${PRIMARY_CMD} codex sync --dry-run
+  ${PRIMARY_CMD} codex sync --json
+
+See also:
+  ${PRIMARY_CMD} codex switch <label>
+  ${PRIMARY_CMD} codex list
 `);
 }
 
@@ -3116,12 +3416,14 @@ Description:
   - Plan type (plus, free, etc.)
   - Token expiry status
   - Source file location
-  - Active indicator (* for the current account in ~/.codex/auth.json)
-  Accounts are deduplicated by ID to avoid showing duplicates
-  when the same account is stored in multiple files.
+  - Active indicator (* for the activeLabel account)
+  Accounts are deduplicated by email for display and prefer the
+  activeLabel account when duplicates exist.
+  If CLI auth diverges from activeLabel, a warning is shown with a sync hint.
 
 Output columns:
-  * = active        Currently active account
+  * = active        Active account from activeLabel
+  ~ = CLI auth      CLI account when it diverges from activeLabel
   label             Account identifier
   <email>           Email address from token
   Plan              ChatGPT plan type
@@ -3194,6 +3496,7 @@ Description:
   multiple times when sourced from different files.
 
   Tokens are automatically refreshed if expired.
+  If CLI auth diverges from activeLabel, a warning is shown with a sync hint.
 
 Examples:
 	  ${PRIMARY_CMD} codex quota                 Check all Codex accounts
@@ -3998,30 +4301,9 @@ async function handleAdd(args, flags) {
 		
 		// 15. Determine target file and save
 		const targetPath = MULTI_ACCOUNT_PATHS[0]; // ~/.codex-accounts.json
-		let accounts = [];
-		
-		// Read existing accounts if file exists
-		if (existsSync(targetPath)) {
-			try {
-				const raw = readFileSync(targetPath, "utf-8");
-				const parsed = JSON.parse(raw);
-				accounts = Array.isArray(parsed) ? parsed : parsed?.accounts ?? [];
-			} catch {
-				// If file is corrupted, start fresh
-				accounts = [];
-			}
-		}
-		
-		// Append new account
-		accounts.push(newAccount);
-		
-		// Write to file atomically (write to temp, then rename)
-		const dir = dirname(targetPath);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
-		
-		writeFileAtomic(targetPath, JSON.stringify({ accounts }, null, 2) + "\n", { mode: 0o600 });
+		const container = readMultiAccountContainer(targetPath);
+		const accounts = [...container.accounts, newAccount];
+		writeMultiAccountContainer(targetPath, container, accounts, {}, { mode: 0o600 });
 		
 		// 16. Print success message (human-readable OR JSON, not both)
 		if (flags.json) {
@@ -4125,8 +4407,20 @@ async function handleSwitch(args, flags) {
 			}
 			process.exit(1);
 		}
+
+		// 4. Update activeLabel in the source-of-truth multi-account file
+		let activeLabelPath = null;
+		let activeLabelError = null;
+		if (MULTI_ACCOUNT_PATHS.includes(account.source)) {
+			try {
+				const activeUpdate = setCodexActiveLabel(label);
+				activeLabelPath = activeUpdate.path;
+			} catch (err) {
+				activeLabelError = err?.message ?? String(err);
+			}
+		}
 		
-		// 4. Read existing ~/.codex/auth.json to preserve OPENAI_API_KEY
+		// 5. Read existing ~/.codex/auth.json to preserve OPENAI_API_KEY
 		let existingAuth = {};
 		const codexAuthPath = getCodexCliAuthPath();
 		if (existsSync(codexAuthPath)) {
@@ -4139,7 +4433,7 @@ async function handleSwitch(args, flags) {
 			}
 		}
 		
-		// 5. Build new auth.json structure (matching Codex CLI format)
+		// 6. Build new auth.json structure (matching Codex CLI format)
 		const tokens = {
 			access_token: account.access,
 			refresh_token: account.refresh,
@@ -4161,31 +4455,31 @@ async function handleSwitch(args, flags) {
 			codex_quota_label: label,
 		};
 		
-		// 6. Create ~/.codex directory if needed
+		// 7. Create ~/.codex directory if needed
 		const codexDir = dirname(codexAuthPath);
 		if (!existsSync(codexDir)) {
 			mkdirSync(codexDir, { recursive: true });
 		}
 		
-		// 7. Write auth.json atomically (temp file + rename) with 0600 permissions
+		// 8. Write auth.json atomically (temp file + rename) with 0600 permissions
 		writeFileAtomic(codexAuthPath, JSON.stringify(newAuth, null, 2) + "\n", { mode: 0o600 });
 		
-		// 8. Update OpenCode auth.json if present
+		// 9. Update OpenCode auth.json if present
 		const opencodeUpdate = updateOpencodeAuth(account);
 		if (opencodeUpdate.error && !flags.json) {
 			console.error(colorize(`Warning: ${opencodeUpdate.error}`, YELLOW));
 		}
 		
-		// 9. Update pi auth.json if present
+		// 10. Update pi auth.json if present
 		const piUpdate = updatePiAuth(account);
 		if (piUpdate.error && !flags.json) {
 			console.error(colorize(`Warning: ${piUpdate.error}`, YELLOW));
 		}
 		
-		// 10. Get profile info for display
+		// 11. Get profile info for display
 		const profile = extractProfile(account.access);
 		
-		// 11. Print confirmation (JSON OR human-readable, not both)
+		// 12. Print confirmation (JSON OR human-readable, not both)
 		if (flags.json) {
 			const output = {
 				success: true,
@@ -4194,6 +4488,12 @@ async function handleSwitch(args, flags) {
 				accountId: account.accountId,
 				authPath: codexAuthPath,
 			};
+			if (activeLabelPath) {
+				output.activeLabelPath = activeLabelPath;
+			}
+			if (activeLabelError) {
+				output.activeLabelError = activeLabelError;
+			}
 			if (opencodeUpdate.updated) {
 				output.opencodeAuthPath = opencodeUpdate.path;
 			} else if (opencodeUpdate.error) {
@@ -4206,6 +4506,9 @@ async function handleSwitch(args, flags) {
 			}
 			console.log(JSON.stringify(output, null, 2));
 		} else {
+			if (activeLabelError) {
+				console.error(colorize(`Warning: Failed to update activeLabel: ${activeLabelError}`, YELLOW));
+			}
 			const emailDisplay = profile.email ? ` <${profile.email}>` : "";
 			const planDisplay = profile.planType ? ` (${profile.planType})` : "";
 			const lines = [
@@ -4213,6 +4516,9 @@ async function handleSwitch(args, flags) {
 				"",
 				`Codex CLI: ${shortenPath(codexAuthPath)}`,
 			];
+			if (activeLabelPath) {
+				lines.push(`Active label: ${shortenPath(activeLabelPath)}`);
+			}
 			if (opencodeUpdate.updated) {
 				lines.push(`OpenCode:  ${shortenPath(opencodeUpdate.path)}`);
 			}
@@ -4237,24 +4543,670 @@ async function handleSwitch(args, flags) {
 }
 
 /**
+ * Handle sync subcommand - sync the activeLabel account to CLI auth files
+ * @param {string[]} args - Non-flag arguments (unused)
+ * @param {{ json: boolean, dryRun?: boolean }} flags - Parsed flags
+ */
+async function handleCodexSync(args, flags) {
+	const dryRun = Boolean(flags.dryRun);
+	try {
+		const divergence = detectCodexDivergence({ allowMigration: !dryRun });
+		const activeLabel = divergence.activeLabel ?? null;
+		if (!activeLabel) {
+			const message = "No activeLabel set. Run 'codex-quota codex switch <label>' first.";
+			if (flags.json) {
+				console.log(JSON.stringify({ success: false, error: message }, null, 2));
+			} else {
+				console.error(colorize(`Error: ${message}`, RED));
+			}
+			process.exit(1);
+		}
+
+		const account = divergence.activeAccount ?? findCodexAccountByLabelInFiles(activeLabel);
+		if (!account) {
+			const message = `Active label "${activeLabel}" could not be resolved in multi-account files.`;
+			if (flags.json) {
+				console.log(JSON.stringify({ success: false, error: message, activeLabel }, null, 2));
+			} else {
+				console.error(colorize(`Error: ${message}`, RED));
+			}
+			process.exit(1);
+		}
+
+		if (!dryRun) {
+			const refreshAccounts = loadAllAccountsNoDedup();
+			const tokenOk = await ensureFreshToken(account, refreshAccounts);
+			if (!tokenOk) {
+				const message = `Failed to refresh token for "${activeLabel}". Re-authentication may be required.`;
+				if (flags.json) {
+					console.log(JSON.stringify({ success: false, error: message, activeLabel }, null, 2));
+				} else {
+					console.error(colorize(`Error: ${message}`, RED));
+				}
+				process.exit(1);
+			}
+		}
+
+		const profile = extractProfile(account.access);
+		const email = profile.email ?? null;
+		const updatedPaths = [];
+		const skippedPaths = [];
+		const warnings = [];
+
+		const codexAuthPath = getCodexCliAuthPath();
+		if (dryRun) {
+			updatedPaths.push(codexAuthPath);
+		} else {
+			let existingAuth = {};
+			if (existsSync(codexAuthPath)) {
+				try {
+					const raw = readFileSync(codexAuthPath, "utf-8");
+					const parsed = JSON.parse(raw);
+					if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+						existingAuth = parsed;
+					}
+				} catch {
+					existingAuth = {};
+				}
+			}
+			const existingTokens = existingAuth.tokens && typeof existingAuth.tokens === "object" && !Array.isArray(existingAuth.tokens)
+				? existingAuth.tokens
+				: {};
+			const expiresAt = Math.floor(((account.expires ?? (Date.now() - 1000)) / 1000));
+			const updatedTokens = {
+				...existingTokens,
+				access_token: account.access,
+				refresh_token: account.refresh,
+				account_id: account.accountId,
+				expires_at: expiresAt,
+			};
+			if (account.idToken) {
+				updatedTokens.id_token = account.idToken;
+			} else if ("id_token" in updatedTokens) {
+				delete updatedTokens.id_token;
+			}
+			const updatedAuth = {
+				...existingAuth,
+				tokens: updatedTokens,
+				last_refresh: new Date().toISOString(),
+				codex_quota_label: activeLabel,
+			};
+			writeFileAtomic(codexAuthPath, JSON.stringify(updatedAuth, null, 2) + "\n", { mode: 0o600 });
+			updatedPaths.push(codexAuthPath);
+		}
+
+		const opencodePath = getOpencodeAuthPath();
+		if (existsSync(opencodePath)) {
+			if (dryRun) {
+				updatedPaths.push(opencodePath);
+			} else {
+				const result = updateOpencodeAuth(account);
+				if (result.updated) {
+					updatedPaths.push(result.path);
+				} else if (result.error) {
+					warnings.push(result.error);
+				}
+			}
+		} else {
+			skippedPaths.push(opencodePath);
+		}
+
+		const piPath = getPiAuthPath();
+		if (existsSync(piPath)) {
+			if (dryRun) {
+				updatedPaths.push(piPath);
+			} else {
+				const result = updatePiAuth(account);
+				if (result.updated) {
+					updatedPaths.push(result.path);
+				} else if (result.error) {
+					warnings.push(result.error);
+				}
+			}
+		} else {
+			skippedPaths.push(piPath);
+		}
+
+		if (flags.json) {
+			console.log(JSON.stringify({
+				success: true,
+				dryRun,
+				activeLabel,
+				email,
+				accountId: account.accountId,
+				updated: updatedPaths,
+				skipped: skippedPaths,
+				warnings,
+			}, null, 2));
+			return;
+		}
+
+		const emailDisplay = email ? ` <${email}>` : "";
+		const lines = [
+			`Syncing active account: ${activeLabel}${emailDisplay}`,
+			"",
+		];
+		if (dryRun) {
+			lines.push("Dry run: no files were written.");
+			lines.push("");
+		}
+		lines.push("Updated:");
+		if (updatedPaths.length) {
+			for (const path of updatedPaths) {
+				lines.push(`  ${shortenPath(path)}`);
+			}
+		} else {
+			lines.push("  (none)");
+		}
+		lines.push("");
+		lines.push("Skipped (not found):");
+		if (skippedPaths.length) {
+			for (const path of skippedPaths) {
+				lines.push(`  ${shortenPath(path)}`);
+			}
+		} else {
+			lines.push("  (none)");
+		}
+		const boxLines = drawBox(lines);
+		console.log(boxLines.join("\n"));
+		for (const warning of warnings) {
+			console.error(colorize(`Warning: ${warning}`, YELLOW));
+		}
+	} catch (error) {
+		if (flags.json) {
+			console.log(JSON.stringify({
+				success: false,
+				error: error.message,
+			}, null, 2));
+		} else {
+			console.error(colorize(`Error: ${error.message}`, RED));
+		}
+		process.exit(1);
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Active label and divergence detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Read Codex CLI auth.json and resolve key metadata.
+ * Prefers tokens.account_id when present.
+ * @returns {{
+ * 	path: string,
+ * 	exists: boolean,
+ * 	parsed: Record<string, unknown> | null,
+ * 	tokens: Record<string, unknown> | null,
+ * 	accountId: string | null,
+ * 	trackedLabel: string | null,
+ * 	error?: string,
+ * }}
+ */
+function readCodexCliAuth() {
+	const path = getCodexCliAuthPath();
+	if (!existsSync(path)) {
+		return {
+			path,
+			exists: false,
+			parsed: null,
+			tokens: null,
+			accountId: null,
+			trackedLabel: null,
+		};
+	}
+
+	try {
+		const raw = readFileSync(path, "utf-8");
+		const parsed = JSON.parse(raw);
+		const tokens = parsed?.tokens && typeof parsed.tokens === "object" && !Array.isArray(parsed.tokens)
+			? parsed.tokens
+			: null;
+		const accountId = resolveCodexCliAccountId(tokens);
+		const trackedLabel = typeof parsed?.codex_quota_label === "string" ? parsed.codex_quota_label : null;
+		return {
+			path,
+			exists: true,
+			parsed,
+			tokens,
+			accountId,
+			trackedLabel,
+		};
+	} catch (err) {
+		return {
+			path,
+			exists: true,
+			parsed: null,
+			tokens: null,
+			accountId: null,
+			trackedLabel: null,
+			error: err?.message ?? String(err),
+		};
+	}
+}
+
+/**
+ * Resolve a Codex CLI accountId from the tokens object.
+ * Prefers tokens.account_id and falls back to decoding the access token.
+ * @param {Record<string, unknown> | null} tokens
+ * @returns {string | null}
+ */
+function resolveCodexCliAccountId(tokens) {
+	if (!tokens) return null;
+	const direct = tokens.account_id ?? tokens.accountId ?? null;
+	if (typeof direct === "string" && direct) {
+		return direct;
+	}
+	const accessToken = tokens.access_token ?? tokens.accessToken ?? null;
+	if (typeof accessToken === "string" && accessToken) {
+		return extractAccountId(accessToken);
+	}
+	return null;
+}
+
+/**
+ * Normalize a Codex account entry from a multi-account file.
+ * @param {unknown} entry - Raw account entry
+ * @param {string} source - Source path
+ * @returns {{ label: string, accountId: string, access: string, refresh: string, expires?: number, idToken?: string, source: string } | null}
+ */
+function normalizeCodexAccountEntry(entry, source) {
+	if (!entry || typeof entry !== "object") return null;
+	const label = entry.label ?? null;
+	const accountId = entry.accountId ?? entry.account_id ?? null;
+	const access = entry.access ?? entry.access_token ?? null;
+	const refresh = entry.refresh ?? entry.refresh_token ?? null;
+	const expires = entry.expires ?? entry.expires_at ?? null;
+	const idToken = entry.idToken ?? entry.id_token ?? null;
+	const normalized = {
+		...entry,
+		label,
+		accountId,
+		access,
+		refresh,
+		expires,
+		idToken,
+		source,
+	};
+	return isValidAccount(normalized) ? normalized : null;
+}
+
+/**
+ * Find a Codex account by label using no-dedup file-only resolution.
+ * This avoids email-based deduplication dropping valid labels.
+ * @param {string} label
+ * @returns {{ label: string, accountId: string, access: string, refresh: string, expires?: number, idToken?: string, source: string } | null}
+ */
+function findCodexAccountByLabelInFiles(label) {
+	for (const path of MULTI_ACCOUNT_PATHS) {
+		if (!existsSync(path)) continue;
+		const container = readMultiAccountContainer(path);
+		if (container.rootType === "invalid") continue;
+		for (const entry of container.accounts) {
+			const normalized = normalizeCodexAccountEntry(entry, path);
+			if (normalized?.label === label) {
+				return normalized;
+			}
+		}
+	}
+	return null;
+}
+
+/**
+ * Find a Codex account by accountId using file-only resolution.
+ * @param {string | null} accountId
+ * @returns {{ label: string, accountId: string, source: string } | null}
+ */
+function findCodexAccountByAccountIdInFiles(accountId) {
+	if (!accountId) return null;
+	for (const path of MULTI_ACCOUNT_PATHS) {
+		if (!existsSync(path)) continue;
+		const container = readMultiAccountContainer(path);
+		if (container.rootType === "invalid") continue;
+		for (const entry of container.accounts) {
+			if (!entry || typeof entry !== "object") continue;
+			const entryAccountId = entry.accountId ?? entry.account_id ?? null;
+			if (entryAccountId === accountId && typeof entry.label === "string") {
+				return { label: entry.label, accountId, source: path };
+			}
+		}
+	}
+	return null;
+}
+
+/**
+ * Check whether we have any Codex multi-account file available.
+ * @returns {boolean}
+ */
+function hasCodexMultiAccountStore() {
+	return MULTI_ACCOUNT_PATHS.some(path => existsSync(path));
+}
+
+/**
+ * Update Codex activeLabel in the source-of-truth container.
+ * Active label is stored only in the first existing multi-account file.
+ * @param {string | null} activeLabel
+ * @returns {{ updated: boolean, path: string | null, skipped?: boolean }}
+ */
+function setCodexActiveLabel(activeLabel) {
+	if (!hasCodexMultiAccountStore()) {
+		return { updated: false, path: null, skipped: true };
+	}
+	const { path, container } = readCodexActiveStoreContainer();
+	writeMultiAccountContainer(path, container, container.accounts, { activeLabel }, { mode: 0o600 });
+	return { updated: true, path };
+}
+
+/**
+ * Update Claude activeLabel in the source-of-truth container.
+ * @param {string | null} activeLabel
+ * @returns {{ updated: boolean, path: string | null, skipped?: boolean }}
+ */
+function setClaudeActiveLabel(activeLabel) {
+	if (!CLAUDE_MULTI_ACCOUNT_PATHS.some(path => existsSync(path))) {
+		return { updated: false, path: null, skipped: true };
+	}
+	const { path, container } = readClaudeActiveStoreContainer();
+	writeMultiAccountContainer(path, container, container.accounts, { activeLabel }, { mode: 0o600 });
+	return { updated: true, path };
+}
+
+/**
+ * Clear codex_quota_label when it matches the removed account and accountId guard passes.
+ * @param {{ label: string, accountId: string }} account
+ * @returns {{ updated: boolean, path: string | null, skipped?: boolean, reason?: string }}
+ */
+function clearCodexQuotaLabelForRemovedAccount(account) {
+	const cliAuth = readCodexCliAuth();
+	if (!cliAuth.exists || !cliAuth.parsed) {
+		return { updated: false, path: null, skipped: true, reason: "auth-missing" };
+	}
+	if (!cliAuth.trackedLabel || cliAuth.trackedLabel !== account.label) {
+		return { updated: false, path: cliAuth.path, skipped: true, reason: "label-mismatch" };
+	}
+	if (!cliAuth.accountId || cliAuth.accountId !== account.accountId) {
+		return { updated: false, path: cliAuth.path, skipped: true, reason: "account-id-mismatch" };
+	}
+	const updatedPayload = { ...cliAuth.parsed };
+	delete updatedPayload.codex_quota_label;
+	writeFileAtomic(cliAuth.path, JSON.stringify(updatedPayload, null, 2) + "\n", { mode: 0o600 });
+	return { updated: true, path: cliAuth.path };
+}
+
+/**
+ * Guarded migration: promote codex_quota_label to activeLabel when accountId matches.
+ * @param {{ path: string, container: ReturnType<typeof readMultiAccountContainer> }} activeStore
+ * @param {ReturnType<typeof readCodexCliAuth>} cliAuth
+ * @returns {{ migrated: boolean, activeLabel: string | null }}
+ */
+function maybeMigrateCodexQuotaLabelToActiveLabel(activeStore, cliAuth) {
+	const currentActiveLabel = activeStore.container.activeLabel ?? null;
+	if (currentActiveLabel) {
+		return { migrated: false, activeLabel: currentActiveLabel };
+	}
+	const trackedLabel = cliAuth.trackedLabel ?? null;
+	const cliAccountId = cliAuth.accountId ?? null;
+	if (!trackedLabel || !cliAccountId) {
+		return { migrated: false, activeLabel: null };
+	}
+	const trackedAccount = findCodexAccountByLabelInFiles(trackedLabel);
+	if (!trackedAccount) {
+		return { migrated: false, activeLabel: null };
+	}
+	if (trackedAccount.accountId !== cliAccountId) {
+		return { migrated: false, activeLabel: null };
+	}
+	writeMultiAccountContainer(
+		activeStore.path,
+		activeStore.container,
+		activeStore.container.accounts,
+		{ activeLabel: trackedLabel },
+		{ mode: 0o600 },
+	);
+	return { migrated: true, activeLabel: trackedLabel };
+}
+
+/**
+ * Detect whether Codex CLI auth diverged from activeLabel.
+ * @param {{ allowMigration?: boolean }} [options]
+ * @returns {{
+ * 	activeLabel: string | null,
+ * 	activeAccount: ReturnType<typeof findCodexAccountByLabelInFiles> | null,
+ * 	activeStorePath: string,
+ * 	cliAccountId: string | null,
+ * 	cliLabel: string | null,
+ * 	diverged: boolean,
+ * 	migrated: boolean,
+ * }}
+ */
+function detectCodexDivergence(options = {}) {
+	const allowMigration = options.allowMigration !== false;
+	const activeStore = readCodexActiveStoreContainer();
+	const cliAuth = readCodexCliAuth();
+	const migration = allowMigration
+		? maybeMigrateCodexQuotaLabelToActiveLabel(activeStore, cliAuth)
+		: { migrated: false, activeLabel: activeStore.container.activeLabel ?? null };
+	if (!allowMigration && !migration.activeLabel) {
+		const trackedLabel = cliAuth.trackedLabel ?? null;
+		const cliAccountId = cliAuth.accountId ?? null;
+		if (trackedLabel && cliAccountId) {
+			const trackedAccount = findCodexAccountByLabelInFiles(trackedLabel);
+			if (trackedAccount && trackedAccount.accountId === cliAccountId) {
+				migration.activeLabel = trackedLabel;
+			}
+		}
+	}
+	const activeLabel = migration.activeLabel ?? activeStore.container.activeLabel ?? null;
+	const activeAccount = activeLabel ? findCodexAccountByLabelInFiles(activeLabel) : null;
+	const activeAccountId = activeAccount?.accountId ?? null;
+	const cliAccountId = cliAuth.accountId ?? null;
+	const cliMatch = findCodexAccountByAccountIdInFiles(cliAccountId);
+	const cliLabel = cliMatch?.label ?? null;
+	const diverged = Boolean(activeAccountId && cliAccountId && activeAccountId !== cliAccountId);
+	return {
+		activeLabel,
+		activeAccount,
+		activeStorePath: activeStore.path,
+		cliAccountId,
+		cliLabel,
+		diverged,
+		migrated: migration.migrated,
+	};
+}
+
+/**
+ * Find the active Claude account in the source-of-truth file.
+ * @returns {{ activeLabel: string | null, account: ReturnType<typeof normalizeClaudeAccount> | null, path: string }}
+ */
+function getActiveClaudeAccountFromStore() {
+	const { path, container } = readClaudeActiveStoreContainer();
+	const activeLabel = container.activeLabel ?? null;
+	if (!activeLabel) {
+		return { activeLabel: null, account: null, path };
+	}
+	if (container.rootType === "invalid") {
+		return { activeLabel, account: null, path };
+	}
+	for (const entry of container.accounts) {
+		if (!entry || typeof entry !== "object") continue;
+		if (entry.label !== activeLabel) continue;
+		const normalized = normalizeClaudeAccount(entry, path);
+		if (normalized && isValidClaudeAccount(normalized)) {
+			return { activeLabel, account: normalized, path };
+		}
+	}
+	return { activeLabel, account: null, path };
+}
+
+/**
+ * Read Claude OAuth tokens from Claude Code credentials.
+ * @returns {{ name: string, path: string, exists: boolean, tokens: ReturnType<typeof normalizeClaudeOauthEntryTokens> | null }}
+ */
+function readClaudeCodeOauthStore() {
+	const path = process.env.CLAUDE_CREDENTIALS_PATH || CLAUDE_CREDENTIALS_PATH;
+	if (!existsSync(path)) {
+		return { name: "claude-code", path, exists: false, tokens: null };
+	}
+	try {
+		const raw = readFileSync(path, "utf-8");
+		const parsed = JSON.parse(raw);
+		const oauth = parsed?.claudeAiOauth ?? parsed?.claude_ai_oauth ?? {};
+		return { name: "claude-code", path, exists: true, tokens: normalizeClaudeOauthEntryTokens(oauth) };
+	} catch {
+		return { name: "claude-code", path, exists: true, tokens: null };
+	}
+}
+
+/**
+ * Read Claude OAuth tokens from OpenCode auth.json.
+ * @returns {{ name: string, path: string, exists: boolean, tokens: ReturnType<typeof normalizeClaudeOauthEntryTokens> | null }}
+ */
+function readOpencodeClaudeOauthStore() {
+	const path = getOpencodeAuthPath();
+	if (!existsSync(path)) {
+		return { name: "opencode", path, exists: false, tokens: null };
+	}
+	try {
+		const raw = readFileSync(path, "utf-8");
+		const parsed = JSON.parse(raw);
+		return { name: "opencode", path, exists: true, tokens: normalizeClaudeOauthEntryTokens(parsed?.anthropic ?? {}) };
+	} catch {
+		return { name: "opencode", path, exists: true, tokens: null };
+	}
+}
+
+/**
+ * Read Claude OAuth tokens from pi auth.json.
+ * @returns {{ name: string, path: string, exists: boolean, tokens: ReturnType<typeof normalizeClaudeOauthEntryTokens> | null }}
+ */
+function readPiClaudeOauthStore() {
+	const path = getPiAuthPath();
+	if (!existsSync(path)) {
+		return { name: "pi", path, exists: false, tokens: null };
+	}
+	try {
+		const raw = readFileSync(path, "utf-8");
+		const parsed = JSON.parse(raw);
+		return { name: "pi", path, exists: true, tokens: normalizeClaudeOauthEntryTokens(parsed?.anthropic ?? {}) };
+	} catch {
+		return { name: "pi", path, exists: true, tokens: null };
+	}
+}
+
+/**
+ * Compare Claude OAuth tokens, preferring refresh-token matching.
+ * @param {{ oauthToken?: string | null, oauthRefreshToken?: string | null }} activeAccount
+ * @param {ReturnType<typeof normalizeClaudeOauthEntryTokens> | null} storeTokens
+ * @returns {{ considered: boolean, matches: boolean | null, method: "refresh" | "access" | null }}
+ */
+function compareClaudeOauthTokens(activeAccount, storeTokens) {
+	if (!storeTokens) {
+		return { considered: false, matches: null, method: null };
+	}
+	const activeRefresh = activeAccount.oauthRefreshToken ?? null;
+	const storeRefresh = storeTokens.refresh ?? null;
+	if (activeRefresh && storeRefresh) {
+		return {
+			considered: true,
+			matches: activeRefresh === storeRefresh,
+			method: "refresh",
+		};
+	}
+	const activeAccess = activeAccount.oauthToken ?? null;
+	const storeAccess = storeTokens.access ?? null;
+	if (activeAccess && storeAccess) {
+		return {
+			considered: true,
+			matches: activeAccess === storeAccess,
+			method: "access",
+		};
+	}
+	return { considered: false, matches: null, method: null };
+}
+
+/**
+ * Detect whether Claude CLI auth stores diverged from activeLabel.
+ * Uses token matching and degrades gracefully when OAuth tokens are absent.
+ * @returns {{
+ * 	activeLabel: string | null,
+ * 	activeAccount: ReturnType<typeof normalizeClaudeAccount> | null,
+ * 	activeStorePath: string,
+ * 	diverged: boolean,
+ * 	skipped: boolean,
+ * 	skipReason: string | null,
+ * 	stores: Array<{ name: string, path: string, exists: boolean, considered: boolean, matches: boolean | null, method: string | null }>,
+ * }}
+ */
+function detectClaudeDivergence() {
+	const active = getActiveClaudeAccountFromStore();
+	const activeLabel = active.activeLabel ?? null;
+	const activeAccount = active.account ?? null;
+	if (!activeLabel) {
+		return {
+			activeLabel: null,
+			activeAccount: null,
+			activeStorePath: active.path,
+			diverged: false,
+			skipped: true,
+			skipReason: "no-active-label",
+			stores: [],
+		};
+	}
+	if (!activeAccount) {
+		return {
+			activeLabel,
+			activeAccount: null,
+			activeStorePath: active.path,
+			diverged: false,
+			skipped: true,
+			skipReason: "active-account-missing",
+			stores: [],
+		};
+	}
+	if (!activeAccount.oauthToken) {
+		return {
+			activeLabel,
+			activeAccount,
+			activeStorePath: active.path,
+			diverged: false,
+			skipped: true,
+			skipReason: "active-account-not-oauth",
+			stores: [],
+		};
+	}
+
+	const stores = [
+		readClaudeCodeOauthStore(),
+		readOpencodeClaudeOauthStore(),
+		readPiClaudeOauthStore(),
+	].map(store => {
+		const comparison = compareClaudeOauthTokens(activeAccount, store.tokens);
+		return {
+			name: store.name,
+			path: store.path,
+			exists: store.exists,
+			considered: comparison.considered,
+			matches: comparison.matches,
+			method: comparison.method,
+		};
+	});
+	const diverged = stores.some(store => store.considered && store.matches === false);
+	return {
+		activeLabel,
+		activeAccount,
+		activeStorePath: active.path,
+		diverged,
+		skipped: false,
+		skipReason: null,
+		stores,
+	};
+}
+
+/**
  * Get the currently active account_id from ~/.codex/auth.json
  * @returns {string | null} Active account ID or null if not found
  */
 function getActiveAccountId() {
-	const codexAuthPath = getCodexCliAuthPath();
-	if (!existsSync(codexAuthPath)) return null;
-	
-	try {
-		const raw = readFileSync(codexAuthPath, "utf-8");
-		const parsed = JSON.parse(raw);
-		const tokens = parsed?.tokens;
-		if (tokens?.access_token) {
-			return extractAccountId(tokens.access_token);
-		}
-	} catch {
-		// Invalid JSON or read error
-	}
-	return null;
+	return readCodexCliAuth().accountId ?? null;
 }
 
 /**
@@ -4263,27 +5215,12 @@ function getActiveAccountId() {
  * @returns {{ accountId: string | null, trackedLabel: string | null, source: "codex-quota" | "native" | null }}
  */
 function getActiveAccountInfo() {
-	const codexAuthPath = getCodexCliAuthPath();
-	if (!existsSync(codexAuthPath)) {
-		return { accountId: null, trackedLabel: null, source: null };
+	const info = readCodexCliAuth();
+	if (!info.exists || !info.accountId) {
+		return { accountId: null, trackedLabel: info.trackedLabel ?? null, source: null };
 	}
-	
-	try {
-		const raw = readFileSync(codexAuthPath, "utf-8");
-		const parsed = JSON.parse(raw);
-		const tokens = parsed?.tokens;
-		const trackedLabel = parsed?.codex_quota_label ?? null;
-		
-		if (tokens?.access_token) {
-			const accountId = extractAccountId(tokens.access_token);
-			// Determine source: if we have our label marker, it was set by codex-quota
-			const source = trackedLabel ? "codex-quota" : "native";
-			return { accountId, trackedLabel, source };
-		}
-	} catch {
-		// Invalid JSON or read error
-	}
-	return { accountId: null, trackedLabel: null, source: null };
+	const source = info.trackedLabel ? "codex-quota" : "native";
+	return { accountId: info.accountId, trackedLabel: info.trackedLabel ?? null, source };
 }
 
 /**
@@ -4344,7 +5281,9 @@ function shortenPath(filePath) {
  * @param {{ json: boolean }} flags - Parsed flags
  */
 async function handleList(flags) {
-	const accounts = loadAllAccounts();
+	const codexDivergence = detectCodexDivergence({ allowMigration: false });
+	const activeLabel = codexDivergence.activeLabel ?? null;
+	const accounts = loadAllAccounts(activeLabel);
 	
 	// Handle zero accounts case
 	if (!accounts.length) {
@@ -4363,31 +5302,21 @@ async function handleList(flags) {
 		return;
 	}
 	
-	// Get active account info from ~/.codex/auth.json
-	const activeInfo = getActiveAccountInfo();
-	const { accountId: activeAccountId, trackedLabel, source: authSource } = activeInfo;
-	
-	// Detect divergence: native login occurred if accountId exists but trackedLabel doesn't match
-	// any managed account, or if authSource is "native"
-	let divergenceDetected = false;
-	let nativeAccountId = null;
-	
-	if (activeAccountId && authSource === "native") {
-		// Native login detected (no codex_quota_label in auth.json)
-		divergenceDetected = true;
-		nativeAccountId = activeAccountId;
-	}
+	const activeAccountId = codexDivergence.activeAccount?.accountId ?? null;
+	const cliAccountId = codexDivergence.cliAccountId ?? null;
+	const cliLabel = codexDivergence.cliLabel ?? null;
+	const divergenceDetected = codexDivergence.diverged;
+	const nativeAccountId = cliAccountId && (!activeAccountId || cliAccountId !== activeAccountId)
+		? cliAccountId
+		: null;
 	
 	// Build account details for each account
 	const accountDetails = accounts.map(account => {
 		const profile = extractProfile(account.access);
 		const expiry = formatExpiryStatus(account.expires);
 		
-		// isActive: matches our tracked label (set by codex-quota switch)
-		const isActive = trackedLabel !== null && account.label === trackedLabel;
-		
-		// isNativeActive: accountId matches but not tracked by us (native login)
-		const isNativeActive = !isActive && account.accountId === nativeAccountId;
+		const isActive = activeLabel !== null && account.label === activeLabel;
+		const isNativeActive = !isActive && nativeAccountId !== null && account.accountId === nativeAccountId;
 		
 		return {
 			label: account.label,
@@ -4408,14 +5337,30 @@ async function handleList(flags) {
 		const output = {
 			accounts: accountDetails,
 			activeInfo: {
-				trackedLabel,
-				accountId: activeAccountId,
-				source: authSource,
+				activeLabel,
+				activeAccountId,
+				activeStorePath: codexDivergence.activeStorePath,
+				cliAccountId,
+				cliLabel,
 				divergence: divergenceDetected,
+				migrated: codexDivergence.migrated,
 			},
 		};
 		console.log(JSON.stringify(output, null, 2));
 		return;
+	}
+
+	if (divergenceDetected) {
+		const activeLabelDisplay = activeLabel ?? "(none)";
+		const activeIdDisplay = activeAccountId ?? "(unknown)";
+		const cliLabelDisplay = cliLabel ?? "(unknown)";
+		const cliIdDisplay = cliAccountId ?? "(unknown)";
+		console.error(colorize("Warning: CLI auth diverged from activeLabel", YELLOW));
+		console.error(`  Active: ${activeLabelDisplay} (${activeIdDisplay})`);
+		console.error(`  CLI:    ${cliLabelDisplay} (${cliIdDisplay})`);
+		console.error("");
+		console.error(`Run '${PRIMARY_CMD} codex sync' to push active account to CLI.`);
+		console.error("");
 	}
 	
 	// Human-readable output with box styling
@@ -4466,10 +5411,10 @@ async function handleList(flags) {
 	if (hasActive || hasNativeActive) {
 		lines.push("");
 		if (hasActive) {
-			lines.push("* = active (set by cq codex switch)");
+			lines.push("* = active (from activeLabel)");
 		}
 		if (hasNativeActive) {
-			lines.push("~ = native login (run 'cq codex switch' to manage)");
+			lines.push(`~ = CLI auth (run '${PRIMARY_CMD} codex sync' to realign)`);
 		}
 	}
 
@@ -4485,6 +5430,8 @@ async function handleList(flags) {
  * @param {{ json: boolean }} flags - Parsed flags
  */
 async function handleClaudeList(flags) {
+	const divergence = detectClaudeDivergence();
+	const activeLabel = divergence.activeLabel ?? null;
 	const claudeAccounts = loadClaudeAccounts();
 
 	if (!claudeAccounts.length) {
@@ -4510,10 +5457,33 @@ async function handleClaudeList(flags) {
 				hasSessionKey: Boolean(account.sessionKey ?? findClaudeSessionKey(account.cookies)),
 				hasOauthToken: Boolean(account.oauthToken),
 				orgId: account.orgId ?? null,
+				isActive: activeLabel !== null && account.label === activeLabel,
 			})),
+			activeInfo: {
+				activeLabel,
+				activeStorePath: divergence.activeStorePath,
+				divergence: divergence.diverged,
+				skipped: divergence.skipped,
+				skipReason: divergence.skipReason,
+			},
 		};
 		console.log(JSON.stringify(output, null, 2));
 		return;
+	}
+
+	if (divergence.diverged) {
+		const divergedStores = divergence.stores
+			.filter(store => store.considered && store.matches === false)
+			.map(store => store.name);
+		const storeDisplay = divergedStores.length ? divergedStores.join(", ") : "one or more stores";
+		console.error(colorize(`Warning: Claude auth diverged from activeLabel (${activeLabel})`, YELLOW));
+		console.error(`  Diverged stores: ${storeDisplay}`);
+		console.error("");
+		console.error(`Run '${PRIMARY_CMD} claude sync' to push active account to CLI.`);
+		console.error("");
+	} else if (divergence.skipped && divergence.skipReason === "active-account-not-oauth" && activeLabel) {
+		console.error("Note: Active Claude account has no OAuth tokens; skipping divergence check.");
+		console.error("");
 	}
 
 	const claudeLines = [];
@@ -4521,6 +5491,9 @@ async function handleClaudeList(flags) {
 	claudeLines.push("");
 	for (let i = 0; i < claudeAccounts.length; i++) {
 		const account = claudeAccounts[i];
+		const isActive = activeLabel !== null && account.label === activeLabel;
+		const marker = isActive ? "*" : " ";
+		const statusText = isActive ? " [active]" : "";
 		const authParts = [];
 		if (account.sessionKey ?? findClaudeSessionKey(account.cookies)) {
 			authParts.push("sessionKey");
@@ -4529,11 +5502,15 @@ async function handleClaudeList(flags) {
 			authParts.push("oauthToken");
 		}
 		const authDisplay = authParts.length ? authParts.join("+") : "unknown";
-		claudeLines.push(`${account.label}`);
+		claudeLines.push(`${marker} ${account.label}${statusText}`);
 		claudeLines.push(`  Auth: ${authDisplay} | ${shortenPath(account.source)}`);
 		if (i < claudeAccounts.length - 1) {
 			claudeLines.push("");
 		}
+	}
+	if (activeLabel !== null) {
+		claudeLines.push("");
+		claudeLines.push("* = active (from activeLabel)");
 	}
 	const claudeBox = drawBox(claudeLines);
 	console.log(claudeBox.join("\n"));
@@ -4672,10 +5649,16 @@ async function handleRemove(args, flags) {
 		}
 		return;
 	}
+
+	const removedWasActive = detectCodexDivergence().activeLabel === label;
+	let activeLabelCleared = false;
+	let activeLabelClearError = null;
+	let codexQuotaLabelCleared = false;
+	let codexQuotaClearError = null;
 	
 	// Handle multi-account files
 	// Count accounts in the same source file
-	const allAccounts = loadAllAccounts();
+	const allAccounts = loadAllAccountsNoDedup();
 	const accountsInSameFile = allAccounts.filter(a => a.source === source);
 	
 	if (accountsInSameFile.length === 1) {
@@ -4690,20 +5673,17 @@ async function handleRemove(args, flags) {
 		}
 	}
 	
-	// Read the file directly (to preserve any extra fields)
-	let existingAccounts = [];
-	try {
-		const raw = readFileSync(source, "utf-8");
-		const parsed = JSON.parse(raw);
-		existingAccounts = Array.isArray(parsed) ? parsed : parsed?.accounts ?? [];
-	} catch {
+	// Read the file container directly (to preserve any extra root fields)
+	const container = readMultiAccountContainer(source);
+	if (container.rootType === "invalid") {
 		if (flags.json) {
-			console.log(JSON.stringify({ success: false, error: `Failed to read ${source}` }, null, 2));
+			console.log(JSON.stringify({ success: false, error: `Failed to parse ${source}` }, null, 2));
 		} else {
 			console.error(colorize(`Error reading ${source}`, RED));
 		}
 		process.exit(1);
 	}
+	const existingAccounts = container.accounts;
 	
 	// Filter out the account with matching label
 	const updatedAccounts = existingAccounts.filter(a => a.label !== label);
@@ -4720,44 +5700,79 @@ async function handleRemove(args, flags) {
 	
 	// Write back or delete
 	try {
-		if (updatedAccounts.length === 0) {
+		const fileDeleted = updatedAccounts.length === 0;
+		if (fileDeleted) {
 			// No accounts left - delete the file
 			unlinkSync(source);
-			if (flags.json) {
-				console.log(JSON.stringify({ 
-					success: true, 
-					label, 
-					source: shortenPath(source),
-					message: "File deleted (no accounts remaining)" 
-				}, null, 2));
-			} else {
-				const lines = [
-					colorize(`Removed account ${label}`, GREEN),
-					"",
-					`Deleted: ${shortenPath(source)} (no accounts remaining)`,
-				];
-				console.log(drawBox(lines).join("\n"));
-			}
 		} else {
 			// Write updated accounts atomically
-			const output = { accounts: updatedAccounts };
-			writeFileAtomic(source, JSON.stringify(output, null, 2) + "\n", { mode: 0o600 });
-			
-			if (flags.json) {
-				console.log(JSON.stringify({ 
-					success: true, 
-					label, 
-					source: shortenPath(source),
-					remainingAccounts: updatedAccounts.length 
-				}, null, 2));
-			} else {
-				const lines = [
-					colorize(`Removed account ${label}`, GREEN),
-					"",
-					`Updated: ${shortenPath(source)} (${updatedAccounts.length} account(s) remaining)`,
-				];
-				console.log(drawBox(lines).join("\n"));
+			writeMultiAccountContainer(source, container, updatedAccounts, {}, { mode: 0o600 });
+		}
+
+		if (removedWasActive) {
+			try {
+				const cleared = setCodexActiveLabel(null);
+				activeLabelCleared = cleared.updated;
+			} catch (err) {
+				activeLabelClearError = err?.message ?? String(err);
 			}
+		}
+
+		try {
+			const cleared = clearCodexQuotaLabelForRemovedAccount(account);
+			codexQuotaLabelCleared = cleared.updated;
+		} catch (err) {
+			codexQuotaClearError = err?.message ?? String(err);
+		}
+
+		if (flags.json) {
+			const output = {
+				success: true,
+				label,
+				source: shortenPath(source),
+			};
+			if (fileDeleted) {
+				output.message = "File deleted (no accounts remaining)";
+			} else {
+				output.remainingAccounts = updatedAccounts.length;
+			}
+			if (removedWasActive) {
+				output.activeLabelCleared = activeLabelCleared;
+			}
+			if (activeLabelClearError) {
+				output.activeLabelError = activeLabelClearError;
+			}
+			if (codexQuotaLabelCleared) {
+				output.codexQuotaLabelCleared = true;
+			}
+			if (codexQuotaClearError) {
+				output.codexQuotaLabelError = codexQuotaClearError;
+			}
+			console.log(JSON.stringify(output, null, 2));
+			return;
+		}
+
+		if (activeLabelClearError) {
+			console.error(colorize(`Warning: Failed to clear activeLabel: ${activeLabelClearError}`, YELLOW));
+		}
+		if (codexQuotaClearError) {
+			console.error(colorize(`Warning: Failed to clear codex_quota_label: ${codexQuotaClearError}`, YELLOW));
+		}
+
+		if (fileDeleted) {
+			const lines = [
+				colorize(`Removed account ${label}`, GREEN),
+				"",
+				`Deleted: ${shortenPath(source)} (no accounts remaining)`,
+			];
+			console.log(drawBox(lines).join("\n"));
+		} else {
+			const lines = [
+				colorize(`Removed account ${label}`, GREEN),
+				"",
+				`Updated: ${shortenPath(source)} (${updatedAccounts.length} account(s) remaining)`,
+			];
+			console.log(drawBox(lines).join("\n"));
 		}
 	} catch (err) {
 		if (flags.json) {
@@ -4833,19 +5848,20 @@ async function handleClaudeRemove(args, flags) {
 		process.exit(1);
 	}
 
-	let existingAccounts = [];
-	try {
-		const raw = readFileSync(source, "utf-8");
-		const parsed = JSON.parse(raw);
-		existingAccounts = Array.isArray(parsed) ? parsed : parsed?.accounts ?? [];
-	} catch {
+	const removedWasActive = getClaudeActiveLabelInfo().activeLabel === label;
+	let activeLabelCleared = false;
+	let activeLabelClearError = null;
+
+	const container = readMultiAccountContainer(source);
+	if (container.rootType === "invalid") {
 		if (flags.json) {
-			console.log(JSON.stringify({ success: false, error: `Failed to read ${source}` }, null, 2));
+			console.log(JSON.stringify({ success: false, error: `Failed to parse ${source}` }, null, 2));
 		} else {
 			console.error(colorize(`Error reading ${shortenPath(source)}`, RED));
 		}
 		process.exit(1);
 	}
+	const existingAccounts = container.accounts;
 
 	const updatedAccounts = existingAccounts.filter(a => a.label !== label);
 	if (updatedAccounts.length === existingAccounts.length) {
@@ -4868,40 +5884,61 @@ async function handleClaudeRemove(args, flags) {
 	}
 
 	try {
-		if (updatedAccounts.length === 0) {
+		const fileDeleted = updatedAccounts.length === 0;
+		if (fileDeleted) {
 			unlinkSync(source);
-			if (flags.json) {
-				console.log(JSON.stringify({
-					success: true,
-					label,
-					source: shortenPath(source),
-					message: "File deleted (no accounts remaining)",
-				}, null, 2));
-			} else {
-				const lines = [
-					colorize(`Removed Claude account ${label}`, GREEN),
-					"",
-					`Deleted: ${shortenPath(source)} (no accounts remaining)`,
-				];
-				console.log(drawBox(lines).join("\n"));
-			}
 		} else {
-			writeFileAtomic(source, JSON.stringify({ accounts: updatedAccounts }, null, 2) + "\n", { mode: 0o600 });
-			if (flags.json) {
-				console.log(JSON.stringify({
-					success: true,
-					label,
-					source: shortenPath(source),
-					remainingAccounts: updatedAccounts.length,
-				}, null, 2));
-			} else {
-				const lines = [
-					colorize(`Removed Claude account ${label}`, GREEN),
-					"",
-					`Updated: ${shortenPath(source)} (${updatedAccounts.length} account(s) remaining)`,
-				];
-				console.log(drawBox(lines).join("\n"));
+			writeMultiAccountContainer(source, container, updatedAccounts, {}, { mode: 0o600 });
+		}
+
+		if (removedWasActive) {
+			try {
+				const cleared = setClaudeActiveLabel(null);
+				activeLabelCleared = cleared.updated;
+			} catch (err) {
+				activeLabelClearError = err?.message ?? String(err);
 			}
+		}
+
+		if (flags.json) {
+			const output = {
+				success: true,
+				label,
+				source: shortenPath(source),
+			};
+			if (fileDeleted) {
+				output.message = "File deleted (no accounts remaining)";
+			} else {
+				output.remainingAccounts = updatedAccounts.length;
+			}
+			if (removedWasActive) {
+				output.activeLabelCleared = activeLabelCleared;
+			}
+			if (activeLabelClearError) {
+				output.activeLabelError = activeLabelClearError;
+			}
+			console.log(JSON.stringify(output, null, 2));
+			return;
+		}
+
+		if (activeLabelClearError) {
+			console.error(colorize(`Warning: Failed to clear activeLabel: ${activeLabelClearError}`, YELLOW));
+		}
+
+		if (fileDeleted) {
+			const lines = [
+				colorize(`Removed Claude account ${label}`, GREEN),
+				"",
+				`Deleted: ${shortenPath(source)} (no accounts remaining)`,
+			];
+			console.log(drawBox(lines).join("\n"));
+		} else {
+			const lines = [
+				colorize(`Removed Claude account ${label}`, GREEN),
+				"",
+				`Updated: ${shortenPath(source)} (${updatedAccounts.length} account(s) remaining)`,
+			];
+			console.log(drawBox(lines).join("\n"));
 		}
 	} catch (err) {
 		if (flags.json) {
@@ -4960,6 +5997,17 @@ async function handleClaudeSwitch(args, flags) {
 		process.exit(1);
 	}
 
+	let activeLabelPath = null;
+	let activeLabelError = null;
+	if (CLAUDE_MULTI_ACCOUNT_PATHS.includes(account.source)) {
+		try {
+			const activeUpdate = setClaudeActiveLabel(label);
+			activeLabelPath = activeUpdate.path;
+		} catch (err) {
+			activeLabelError = err?.message ?? String(err);
+		}
+	}
+
 	const credentialsUpdate = updateClaudeCredentials(account);
 	if (credentialsUpdate.error) {
 		if (flags.json) {
@@ -4985,6 +6033,12 @@ async function handleClaudeSwitch(args, flags) {
 			label,
 			claudeCredentialsPath: credentialsUpdate.path,
 		};
+		if (activeLabelPath) {
+			output.activeLabelPath = activeLabelPath;
+		}
+		if (activeLabelError) {
+			output.activeLabelError = activeLabelError;
+		}
 		if (opencodeUpdate.updated) {
 			output.opencodeAuthPath = opencodeUpdate.path;
 		} else if (opencodeUpdate.error) {
@@ -4999,11 +6053,17 @@ async function handleClaudeSwitch(args, flags) {
 		return;
 	}
 
+	if (activeLabelError) {
+		console.error(colorize(`Warning: Failed to update activeLabel: ${activeLabelError}`, YELLOW));
+	}
 	const lines = [
 		colorize(`Switched Claude credentials to ${label}`, GREEN),
 		"",
 		`Claude Code: ${shortenPath(credentialsUpdate.path)}`,
 	];
+	if (activeLabelPath) {
+		lines.push(`Active label: ${shortenPath(activeLabelPath)}`);
+	}
 	if (opencodeUpdate.updated) {
 		lines.push(`OpenCode: ${shortenPath(opencodeUpdate.path)}`);
 	}
@@ -5011,6 +6071,171 @@ async function handleClaudeSwitch(args, flags) {
 		lines.push(`pi: ${shortenPath(piUpdate.path)}`);
 	}
 	console.log(drawBox(lines).join("\n"));
+}
+
+/**
+ * Handle Claude sync subcommand - sync the activeLabel account to CLI auth files
+ * @param {string[]} args - Non-flag arguments (unused)
+ * @param {{ json: boolean, dryRun?: boolean }} flags - Parsed flags
+ */
+async function handleClaudeSync(args, flags) {
+	const dryRun = Boolean(flags.dryRun);
+	try {
+		const active = getActiveClaudeAccountFromStore();
+		const activeLabel = active.activeLabel ?? null;
+		if (!activeLabel) {
+			const message = "No activeLabel set. Run 'codex-quota claude switch <label>' first.";
+			if (flags.json) {
+				console.log(JSON.stringify({ success: false, error: message }, null, 2));
+			} else {
+				console.error(colorize(`Error: ${message}`, RED));
+			}
+			process.exit(1);
+		}
+		const account = active.account;
+		if (!account) {
+			const message = `Active label "${activeLabel}" could not be resolved in ~/.claude-accounts.json.`;
+			if (flags.json) {
+				console.log(JSON.stringify({ success: false, error: message, activeLabel }, null, 2));
+			} else {
+				console.error(colorize(`Error: ${message}`, RED));
+			}
+			process.exit(1);
+		}
+		if (!account.oauthToken) {
+			const warning = "Active Claude account has no OAuth tokens; nothing to sync.";
+			if (flags.json) {
+				console.log(JSON.stringify({
+					success: true,
+					dryRun,
+					activeLabel,
+					updated: [],
+					skipped: [],
+					warnings: [warning],
+				}, null, 2));
+			} else {
+				console.error(warning);
+			}
+			return;
+		}
+
+		if (!dryRun) {
+			const tokenOk = await ensureFreshClaudeOAuthToken(account);
+			if (!tokenOk) {
+				const message = `Failed to refresh Claude OAuth token for "${activeLabel}".`;
+				if (flags.json) {
+					console.log(JSON.stringify({ success: false, error: message, activeLabel }, null, 2));
+				} else {
+					console.error(colorize(`Error: ${message}`, RED));
+				}
+				process.exit(1);
+			}
+		}
+
+		const updatedPaths = [];
+		const skippedPaths = [];
+		const warnings = [];
+
+		const credentialsPath = process.env.CLAUDE_CREDENTIALS_PATH || CLAUDE_CREDENTIALS_PATH;
+		if (dryRun) {
+			updatedPaths.push(credentialsPath);
+		} else {
+			const credentialsUpdate = updateClaudeCredentials(account);
+			if (credentialsUpdate.error) {
+				if (flags.json) {
+					console.log(JSON.stringify({ success: false, error: credentialsUpdate.error }, null, 2));
+				} else {
+					console.error(colorize(`Error: ${credentialsUpdate.error}`, RED));
+				}
+				process.exit(1);
+			}
+			updatedPaths.push(credentialsUpdate.path);
+		}
+
+		const opencodePath = getOpencodeAuthPath();
+		if (existsSync(opencodePath)) {
+			if (dryRun) {
+				updatedPaths.push(opencodePath);
+			} else {
+				const result = updateOpencodeClaudeAuth(account);
+				if (result.updated) {
+					updatedPaths.push(result.path);
+				} else if (result.error) {
+					warnings.push(result.error);
+				}
+			}
+		} else {
+			skippedPaths.push(opencodePath);
+		}
+
+		const piPath = getPiAuthPath();
+		if (existsSync(piPath)) {
+			if (dryRun) {
+				updatedPaths.push(piPath);
+			} else {
+				const result = updatePiClaudeAuth(account);
+				if (result.updated) {
+					updatedPaths.push(result.path);
+				} else if (result.error) {
+					warnings.push(result.error);
+				}
+			}
+		} else {
+			skippedPaths.push(piPath);
+		}
+
+		if (flags.json) {
+			console.log(JSON.stringify({
+				success: true,
+				dryRun,
+				activeLabel,
+				updated: updatedPaths,
+				skipped: skippedPaths,
+				warnings,
+			}, null, 2));
+			return;
+		}
+
+		const lines = [
+			`Syncing active account: ${activeLabel}`,
+			"",
+		];
+		if (dryRun) {
+			lines.push("Dry run: no files were written.");
+			lines.push("");
+		}
+		lines.push("Updated:");
+		if (updatedPaths.length) {
+			for (const path of updatedPaths) {
+				lines.push(`  ${shortenPath(path)}`);
+			}
+		} else {
+			lines.push("  (none)");
+		}
+		lines.push("");
+		lines.push("Skipped (not found):");
+		if (skippedPaths.length) {
+			for (const path of skippedPaths) {
+				lines.push(`  ${shortenPath(path)}`);
+			}
+		} else {
+			lines.push("  (none)");
+		}
+		console.log(drawBox(lines).join("\n"));
+		for (const warning of warnings) {
+			console.error(colorize(`Warning: ${warning}`, YELLOW));
+		}
+	} catch (error) {
+		if (flags.json) {
+			console.log(JSON.stringify({
+				success: false,
+				error: error.message,
+			}, null, 2));
+		} else {
+			console.error(colorize(`Error: ${error.message}`, RED));
+		}
+		process.exit(1);
+	}
 }
 
 /**
@@ -5115,8 +6340,9 @@ async function handleClaudeAdd(args, flags) {
 			viaMethod = "";
 		}
 
-		const accounts = [...existingAccounts, newAccount];
-		const targetPath = saveClaudeAccounts(accounts);
+		const { path: targetPath, container } = readClaudeActiveStoreContainer();
+		const accounts = [...container.accounts, newAccount];
+		writeMultiAccountContainer(targetPath, container, accounts, {}, { mode: 0o600 });
 
 		if (flags.json) {
 			console.log(JSON.stringify({
@@ -5174,6 +6400,9 @@ async function handleCodex(args, flags) {
 		case "switch":
 			await handleSwitch(subArgs, flags);
 			break;
+		case "sync":
+			await handleCodexSync(subArgs, flags);
+			break;
 		case "list":
 			await handleList(flags);
 			break;
@@ -5216,6 +6445,9 @@ async function handleClaude(args, flags) {
 		case "switch":
 			await handleClaudeSwitch(subArgs, flags);
 			break;
+		case "sync":
+			await handleClaudeSync(subArgs, flags);
+			break;
 		case "remove":
 			await handleClaudeRemove(subArgs, flags);
 			break;
@@ -5245,9 +6477,11 @@ async function handleQuota(args, flags, scope = "all") {
 	const showCodex = scope === "all" || scope === "codex";
 	const showClaude = scope === "all" || scope === "claude";
 	
-	// Use loadAllAccounts() which includes deduplication by accountId
-	const allAccounts = showCodex ? loadAllAccounts() : [];
+	const codexDivergence = showCodex ? detectCodexDivergence({ allowMigration: false }) : null;
+	const codexActiveLabel = codexDivergence?.activeLabel ?? null;
+	const allAccounts = showCodex ? loadAllAccounts(codexActiveLabel) : [];
 	const hasOpenAiAccounts = allAccounts.length > 0;
+	const claudeDivergence = showClaude ? detectClaudeDivergence() : null;
 
 	// Check if we have any accounts to show
 	if (!hasOpenAiAccounts && !showClaude) {
@@ -5397,18 +6631,83 @@ async function handleQuota(args, flags, scope = "all") {
 				source: account.source,
 			};
 		});
+		const codexDivergenceInfo = codexDivergence
+			? {
+				activeLabel: codexDivergence.activeLabel ?? null,
+				activeAccountId: codexDivergence.activeAccount?.accountId ?? null,
+				activeStorePath: codexDivergence.activeStorePath,
+				cliAccountId: codexDivergence.cliAccountId ?? null,
+				cliLabel: codexDivergence.cliLabel ?? null,
+				diverged: codexDivergence.diverged,
+				migrated: codexDivergence.migrated,
+			}
+			: null;
+		const claudeDivergenceInfo = claudeDivergence
+			? {
+				activeLabel: claudeDivergence.activeLabel ?? null,
+				activeStorePath: claudeDivergence.activeStorePath,
+				diverged: claudeDivergence.diverged,
+				skipped: claudeDivergence.skipped,
+				skipReason: claudeDivergence.skipReason,
+				stores: claudeDivergence.stores,
+			}
+			: null;
+		const openaiOutputWithDivergence = codexDivergenceInfo
+			? openaiOutput.map(item => ({ ...item, divergence: codexDivergenceInfo }))
+			: openaiOutput;
+		const claudeOutputWithDivergence = claudeDivergenceInfo
+			? (claudeResults ?? []).map(item => (
+				item && typeof item === "object"
+					? { ...item, divergence: claudeDivergenceInfo }
+					: item
+			))
+			: claudeResults ?? [];
 		// Always output both fields when showing both, or just the relevant one
 		if (showCodex && showClaude) {
-			console.log(JSON.stringify({
-				codex: openaiOutput,
-				claude: claudeResults ?? [],
-			}, null, 2));
+			const payload = {
+				codex: openaiOutputWithDivergence,
+				claude: claudeOutputWithDivergence,
+			};
+			payload.divergence = {
+				codex: codexDivergenceInfo,
+				claude: claudeDivergenceInfo,
+			};
+			console.log(JSON.stringify(payload, null, 2));
 		} else if (showClaude) {
-			console.log(JSON.stringify(claudeResults ?? [], null, 2));
+			console.log(JSON.stringify(claudeOutputWithDivergence, null, 2));
 		} else {
-			console.log(JSON.stringify(openaiOutput, null, 2));
+			console.log(JSON.stringify(openaiOutputWithDivergence, null, 2));
 		}
 		return;
+	}
+
+	if (showCodex && codexDivergence?.diverged) {
+		const activeLabelDisplay = codexDivergence.activeLabel ?? "(none)";
+		const activeIdDisplay = codexDivergence.activeAccount?.accountId ?? "(unknown)";
+		const cliLabelDisplay = codexDivergence.cliLabel ?? "(unknown)";
+		const cliIdDisplay = codexDivergence.cliAccountId ?? "(unknown)";
+		console.error(colorize("Warning: CLI auth diverged from activeLabel", YELLOW));
+		console.error(`  Active: ${activeLabelDisplay} (${activeIdDisplay})`);
+		console.error(`  CLI:    ${cliLabelDisplay} (${cliIdDisplay})`);
+		console.error("");
+		console.error(`Run '${PRIMARY_CMD} codex sync' to push active account to CLI.`);
+		console.error("");
+	}
+
+	if (showClaude && claudeDivergence?.diverged) {
+		const activeLabelDisplay = claudeDivergence.activeLabel ?? "(none)";
+		const divergedStores = claudeDivergence.stores
+			.filter(store => store.considered && store.matches === false)
+			.map(store => store.name);
+		const storeDisplay = divergedStores.length ? divergedStores.join(", ") : "one or more stores";
+		console.error(colorize(`Warning: Claude auth diverged from activeLabel (${activeLabelDisplay})`, YELLOW));
+		console.error(`  Diverged stores: ${storeDisplay}`);
+		console.error("");
+		console.error(`Run '${PRIMARY_CMD} claude sync' to push active account to CLI.`);
+		console.error("");
+	} else if (showClaude && claudeDivergence?.skipped && claudeDivergence.skipReason === "active-account-not-oauth" && claudeDivergence.activeLabel) {
+		console.error("Note: Active Claude account has no OAuth tokens; skipping divergence check.");
+		console.error("");
 	}
 
 	for (const { account, usage } of results) {
@@ -5440,6 +6739,7 @@ async function main() {
 		noColor: args.includes("--no-color"),
 		oauth: args.includes("--oauth"),
 		manual: args.includes("--manual"),
+		dryRun: args.includes("--dry-run"),
 	};
 	
 	// Set global noColorFlag for supportsColor() function
@@ -5466,7 +6766,7 @@ async function main() {
 		return;
 	}
 	
-	const legacyCommands = ["add", "switch", "list", "remove", "quota"];
+	const legacyCommands = ["add", "switch", "list", "remove", "quota", "sync"];
 	if (!namespace && firstArg && legacyCommands.includes(firstArg)) {
 		console.error(colorize(`Error: '${firstArg}' now requires a namespace.`, RED));
 		console.error(`Use '${PRIMARY_CMD} codex ${firstArg}' or '${PRIMARY_CMD} claude ${firstArg}'.`);
@@ -5486,6 +6786,9 @@ async function main() {
 					break;
 				case "switch":
 					printHelpSwitch();
+					break;
+				case "sync":
+					printHelpCodexSync();
 					break;
 				case "list":
 					printHelpList();
@@ -5508,6 +6811,9 @@ async function main() {
 				break;
 			case "switch":
 				printHelpClaudeSwitch();
+				break;
+			case "sync":
+				printHelpClaudeSync();
 				break;
 			case "list":
 				printHelpClaudeList();
@@ -5573,6 +6879,7 @@ export {
 	loadAccountsFromFile,
 	loadAccountFromCodexCli,
 	loadAllAccounts,
+	loadAllAccountsNoDedup,
 	findAccountByLabel,
 	getAllLabels,
 	isValidAccount,
@@ -5619,6 +6926,10 @@ export {
 	extractAccountId,
 	extractProfile,
 	
+	// Divergence helpers (for testing)
+	detectCodexDivergence,
+	detectClaudeDivergence,
+
 	// List helpers (for testing)
 	getActiveAccountId,
 	getActiveAccountInfo,
@@ -5627,8 +6938,12 @@ export {
 	
 	// Subcommand handlers (for testing)
 	handleSwitch,
+	handleCodexSync,
 	handleRemove,
 	handleClaudeAdd,
+	handleClaudeSwitch,
+	handleClaudeSync,
+	handleClaudeRemove,
 	
 	// Color utilities
 	supportsColor,
@@ -5647,7 +6962,9 @@ export {
 	printHelpAdd,
 	printHelpClaude,
 	printHelpClaudeAdd,
+	printHelpClaudeSync,
 	printHelpSwitch,
+	printHelpCodexSync,
 	printHelpList,
 	printHelpRemove,
 	printHelpQuota,

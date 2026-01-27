@@ -36,6 +36,14 @@ codex-quota codex switch personal
 # Switch Claude credentials
 codex-quota claude switch work
 
+# Sync activeLabel to CLI auth files
+codex-quota codex sync
+codex-quota claude sync
+
+# Preview sync without writing files
+codex-quota codex sync --dry-run
+codex-quota claude sync --dry-run
+
 # List accounts
 codex-quota codex list
 codex-quota claude list
@@ -103,6 +111,8 @@ When you run `codex switch`:
 2. **OpenCode** - If `~/.local/share/opencode/auth.json` exists, updates the `openai` provider entry
 3. **pi** - If `~/.pi/agent/auth.json` exists, updates the `openai-codex` provider entry
 
+It also updates `activeLabel` in `~/.codex-accounts.json` when available.
+
 ### claude switch
 
 Switch Claude Code, OpenCode, and pi to a stored Claude credential.
@@ -110,6 +120,9 @@ Switch Claude Code, OpenCode, and pi to a stored Claude credential.
 ```bash
 codex-quota claude switch work
 ```
+
+This updates `activeLabel` in `~/.claude-accounts.json` when available. OAuth-based
+credentials are required to update CLI auth files.
 
 ### codex list
 
@@ -121,9 +134,13 @@ codex-quota codex list --json
 ```
 
 Output shows:
-- `*` = active account (matches `~/.codex/auth.json`)
+- `*` = active account (from `activeLabel`)
+- `~` = CLI auth account when it diverges from `activeLabel`
 - Email, plan type, token expiry
 - Source file for each account
+
+If CLI auth diverges from the tracked `activeLabel`, `list` and `quota` print a warning and
+suggest `codex-quota codex sync` to realign.
 
 ### claude list
 
@@ -133,6 +150,13 @@ List Claude credentials from `CLAUDE_ACCOUNTS` or `~/.claude-accounts.json`.
 codex-quota claude list
 codex-quota claude list --json
 ```
+
+Output shows:
+- `*` = active account (from `activeLabel`)
+- Source file for each credential
+
+For OAuth-based accounts, `list` and `quota` warn when stored tokens diverge from the
+`activeLabel` account. Session-key-only accounts are skipped.
 
 ### codex remove
 
@@ -154,11 +178,40 @@ codex-quota claude remove old-account
 
 Note: Accounts from `CLAUDE_ACCOUNTS` env var cannot be removed via CLI.
 
+### codex sync
+
+Sync the `activeLabel` Codex account to CLI auth files.
+
+```bash
+codex-quota codex sync
+codex-quota codex sync --dry-run
+codex-quota codex sync --json
+```
+
+This updates:
+1. `~/.codex/auth.json`
+2. `~/.local/share/opencode/auth.json` (if it exists)
+3. `~/.pi/agent/auth.json` (if it exists)
+
+### claude sync
+
+Sync the `activeLabel` Claude account to CLI auth files.
+
+```bash
+codex-quota claude sync
+codex-quota claude sync --dry-run
+codex-quota claude sync --json
+```
+
+Only OAuth-based Claude accounts can be synced. Session-key-only accounts are skipped with
+a warning.
+
 ## Options
 
 | Option | Description |
 |--------|-------------|
 | `--json` | Output in JSON format |
+| `--dry-run` | Preview sync without writing files |
 | `--no-browser` | Print auth URL instead of opening browser |
 | `--no-color` | Disable colored output |
 | `--version, -v` | Show version number |
@@ -176,9 +229,20 @@ reads from or writes to each path.
 | `~/.opencode/openai-codex-auth-accounts.json` | OpenCode accounts | Yes | No |
 | `~/.codex/auth.json` | Codex CLI single-account (label `codex-cli`) | Yes | Yes (`switch`) |
 | `~/.local/share/opencode/auth.json` | OpenCode auth file (`openai` provider) | No | Yes (`switch` if it exists) |
+| `~/.pi/agent/auth.json` | pi auth file (`openai-codex` provider) | No | Yes (`switch` if it exists) |
 
 New accounts added via `codex-quota codex add` are saved to `~/.codex-accounts.json`, which is
 shared with OpenCode.
+
+Claude sources (in order):
+
+| Source | Purpose | Read | Write |
+|--------|---------|------|-------|
+| `CLAUDE_ACCOUNTS` env var | JSON array of credentials | Yes | No |
+| `~/.claude-accounts.json` | Claude multi-account file | Yes | Yes (`add`, `remove`) |
+| `~/.claude/.credentials.json` | Claude Code credentials | Yes | Yes (`switch`, `sync`) |
+| `~/.local/share/opencode/auth.json` | OpenCode auth file (`anthropic` provider) | No | Yes (`switch`, `sync` if it exists) |
+| `~/.pi/agent/auth.json` | pi auth file (`anthropic` provider) | No | Yes (`switch`, `sync` if it exists) |
 
 ## Multi-Account JSON Schema
 
@@ -186,6 +250,8 @@ File: `~/.codex-accounts.json`
 
 ```json
 {
+  "schemaVersion": 1,
+  "activeLabel": "personal",
   "accounts": [
     {
       "label": "personal",
@@ -201,6 +267,8 @@ File: `~/.codex-accounts.json`
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `schemaVersion` | number | Schema version marker (root field) |
+| `activeLabel` | string\|null | Active account label (root field) |
 | `label` | string | Unique identifier for the account |
 | `accountId` | string | ChatGPT account UUID |
 | `access` | string | OAuth access token |
@@ -208,7 +276,11 @@ File: `~/.codex-accounts.json`
 | `idToken` | string\|null | OAuth ID token (optional, for email extraction) |
 | `expires` | number | Token expiry timestamp in milliseconds |
 
-**Note:** The `idToken` field was added in v1.0.0. Older files without this field are still supported.
+Root-level fields are preserved on write; unknown root fields are kept intact.
+
+Claude multi-account files (`~/.claude-accounts.json`) use the same root fields
+(`schemaVersion`, `activeLabel`) and store account entries that include a
+`sessionKey` or OAuth tokens.
 
 ## OAuth Flow
 
@@ -303,6 +375,10 @@ codex-quota codex add work --json
 codex-quota codex switch personal --json
 # {"success":true,"label":"personal","email":"...","authPath":"~/.codex/auth.json"}
 
+# Sync (Codex)
+codex-quota codex sync --json
+# {"success":true,"activeLabel":"work","updated":["~/.codex/auth.json",...],"skipped":[...]}
+
 # Errors include structured data
 codex-quota codex switch nonexistent --json
 # {"success":false,"error":"Account not found","availableLabels":["personal","work"]}
@@ -359,6 +435,12 @@ Environment overrides:
 - `CLAUDE_ACCOUNTS` to supply multi-account JSON directly
 - `CLAUDE_CREDENTIALS_PATH` to point to a different credentials file
 - `CLAUDE_COOKIE_DB_PATH` to point to a specific Chromium/Chrome Cookies DB
+
+Codex overrides:
+- `CODEX_ACCOUNTS` to supply multi-account JSON directly (read-only)
+- `CODEX_AUTH_PATH` to point to a different Codex CLI auth file
+- `XDG_DATA_HOME` to relocate OpenCode auth paths
+- `PI_AUTH_PATH` to point to a different pi auth file
 
 Notes:
 - On Linux, cookie access requires `sqlite3` and `secret-tool` (libsecret) to decrypt cookies.
