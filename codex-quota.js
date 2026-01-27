@@ -4409,15 +4409,15 @@ async function handleSwitch(args, flags) {
 		}
 
 		// 4. Update activeLabel in the source-of-truth multi-account file
+		// Always set activeLabel regardless of account source - the label tracking
+		// should work even for accounts loaded from env or single-account files
 		let activeLabelPath = null;
 		let activeLabelError = null;
-		if (MULTI_ACCOUNT_PATHS.includes(account.source)) {
-			try {
-				const activeUpdate = setCodexActiveLabel(label);
-				activeLabelPath = activeUpdate.path;
-			} catch (err) {
-				activeLabelError = err?.message ?? String(err);
-			}
+		try {
+			const activeUpdate = setCodexActiveLabel(label);
+			activeLabelPath = activeUpdate.path;
+		} catch (err) {
+			activeLabelError = err?.message ?? String(err);
 		}
 		
 		// 5. Read existing ~/.codex/auth.json to preserve OPENAI_API_KEY
@@ -4884,16 +4884,15 @@ function hasCodexMultiAccountStore() {
 /**
  * Update Codex activeLabel in the source-of-truth container.
  * Active label is stored only in the first existing multi-account file.
+ * If no multi-account file exists, creates one at the default path.
  * @param {string | null} activeLabel
- * @returns {{ updated: boolean, path: string | null, skipped?: boolean }}
+ * @returns {{ updated: boolean, path: string | null, created?: boolean }}
  */
 function setCodexActiveLabel(activeLabel) {
-	if (!hasCodexMultiAccountStore()) {
-		return { updated: false, path: null, skipped: true };
-	}
+	const created = !hasCodexMultiAccountStore();
 	const { path, container } = readCodexActiveStoreContainer();
 	writeMultiAccountContainer(path, container, container.accounts, { activeLabel }, { mode: 0o600 });
-	return { updated: true, path };
+	return { updated: true, path, created };
 }
 
 /**
@@ -4948,7 +4947,8 @@ function maybeMigrateCodexQuotaLabelToActiveLabel(activeStore, cliAuth) {
 	if (!trackedLabel || !cliAccountId) {
 		return { migrated: false, activeLabel: null };
 	}
-	const trackedAccount = findCodexAccountByLabelInFiles(trackedLabel);
+	// Search all sources (env, files, codex-cli auth) not just multi-account files
+	const trackedAccount = findAccountByLabel(trackedLabel);
 	if (!trackedAccount) {
 		return { migrated: false, activeLabel: null };
 	}
@@ -4989,14 +4989,16 @@ function detectCodexDivergence(options = {}) {
 		const trackedLabel = cliAuth.trackedLabel ?? null;
 		const cliAccountId = cliAuth.accountId ?? null;
 		if (trackedLabel && cliAccountId) {
-			const trackedAccount = findCodexAccountByLabelInFiles(trackedLabel);
+			// Search all sources (env, files, codex-cli auth) not just multi-account files
+			const trackedAccount = findAccountByLabel(trackedLabel);
 			if (trackedAccount && trackedAccount.accountId === cliAccountId) {
 				migration.activeLabel = trackedLabel;
 			}
 		}
 	}
 	const activeLabel = migration.activeLabel ?? activeStore.container.activeLabel ?? null;
-	const activeAccount = activeLabel ? findCodexAccountByLabelInFiles(activeLabel) : null;
+	// Search all sources (env, files, codex-cli auth) not just multi-account files
+	const activeAccount = activeLabel ? findAccountByLabel(activeLabel) : null;
 	const activeAccountId = activeAccount?.accountId ?? null;
 	const cliAccountId = cliAuth.accountId ?? null;
 	const cliMatch = findCodexAccountByAccountIdInFiles(cliAccountId);

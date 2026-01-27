@@ -13,6 +13,7 @@ import {
 	readFileSync,
 	lstatSync,
 	symlinkSync,
+	unlinkSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir, homedir } from "node:os";
@@ -2724,6 +2725,42 @@ describe("handleSwitch", () => {
 		expect(updatedAuth.openai.access).toBe(MOCK_ACCESS_TOKEN);
 		expect(updatedAuth.openai.refresh).toBe(MOCK_REFRESH_TOKEN);
 		expect(updatedAuth.openai.accountId).toBe(MOCK_ACCOUNT_ID);
+	});
+
+	test("switch creates multi-account file with activeLabel when account is from env", async () => {
+		// This test verifies the fix for the bug where switching to an account from env
+		// did not persist the activeLabel because the multi-account file didn't exist
+		const multiAccountPath = MULTI_ACCOUNT_PATHS[0]; // ~/.codex-accounts.json
+		
+		// Backup the real file (may not exist)
+		const backup = existsSync(multiAccountPath) ? readFileSync(multiAccountPath, "utf-8") : null;
+		
+		try {
+			// Ensure no multi-account file exists
+			if (existsSync(multiAccountPath)) {
+				unlinkSync(multiAccountPath);
+			}
+			expect(existsSync(multiAccountPath)).toBe(false);
+			
+			// Account is in env var (set in beforeEach), not in any multi-account file
+			await handleSwitch(["test-switch-account"], { json: true });
+			
+			const output = JSON.parse(consoleOutput.log.join("\n"));
+			expect(output.success).toBe(true);
+			expect(output.label).toBe("test-switch-account");
+			
+			// The multi-account file should be created with activeLabel
+			expect(existsSync(multiAccountPath)).toBe(true);
+			const container = JSON.parse(readFileSync(multiAccountPath, "utf-8"));
+			expect(container.activeLabel).toBe("test-switch-account");
+		} finally {
+			// Restore the backup
+			if (backup === null) {
+				rmSync(multiAccountPath, { force: true });
+			} else {
+				writeFileSync(multiAccountPath, backup, "utf-8");
+			}
+		}
 	});
 });
 
