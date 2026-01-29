@@ -2481,6 +2481,7 @@ describe("handleSwitch", () => {
 	let originalExit;
 	let originalConsoleLog;
 	let originalConsoleError;
+	let originalFetch;
 	let consoleOutput;
 	let exitCode;
 
@@ -2520,6 +2521,7 @@ describe("handleSwitch", () => {
 		// Capture console output
 		originalConsoleLog = console.log;
 		originalConsoleError = console.error;
+		originalFetch = globalThis.fetch;
 		consoleOutput = { log: [], error: [] };
 		console.log = (...args) => consoleOutput.log.push(args.join(" "));
 		console.error = (...args) => consoleOutput.error.push(args.join(" "));
@@ -2778,6 +2780,7 @@ describe("handleRemove", () => {
 	let originalExit;
 	let originalConsoleLog;
 	let originalConsoleError;
+	let originalFetch;
 	let consoleOutput;
 	let exitCode;
 
@@ -2799,6 +2802,7 @@ describe("handleRemove", () => {
 		// Capture console output
 		originalConsoleLog = console.log;
 		originalConsoleError = console.error;
+		originalFetch = globalThis.fetch;
 		consoleOutput = { log: [], error: [] };
 		console.log = (...args) => consoleOutput.log.push(args.join(" "));
 		console.error = (...args) => consoleOutput.error.push(args.join(" "));
@@ -3233,6 +3237,7 @@ describe("handleCodexSync", () => {
 	let exitCode;
 	let originalConsoleLog;
 	let originalConsoleError;
+	let originalFetch;
 	let consoleOutput;
 
 	beforeEach(() => {
@@ -3256,6 +3261,7 @@ describe("handleCodexSync", () => {
 
 		originalConsoleLog = console.log;
 		originalConsoleError = console.error;
+		originalFetch = globalThis.fetch;
 		consoleOutput = { log: [], error: [] };
 		console.log = (...args) => consoleOutput.log.push(args.join(" "));
 		console.error = (...args) => consoleOutput.error.push(args.join(" "));
@@ -3495,6 +3501,7 @@ describe("handleClaudeSync", () => {
 	let exitCode;
 	let originalConsoleLog;
 	let originalConsoleError;
+	let originalFetch;
 	let consoleOutput;
 
 	beforeEach(() => {
@@ -3517,6 +3524,7 @@ describe("handleClaudeSync", () => {
 
 		originalConsoleLog = console.log;
 		originalConsoleError = console.error;
+		originalFetch = globalThis.fetch;
 		consoleOutput = { log: [], error: [] };
 		console.log = (...args) => consoleOutput.log.push(args.join(" "));
 		console.error = (...args) => consoleOutput.error.push(args.join(" "));
@@ -3542,6 +3550,7 @@ describe("handleClaudeSync", () => {
 			process.env.XDG_DATA_HOME = originalXdgDataHome;
 		}
 		restoreFileContents(claudeAccountsPath, claudeAccountsBackup);
+		globalThis.fetch = originalFetch;
 		rmSync(testDir, { recursive: true, force: true });
 	});
 
@@ -3705,6 +3714,61 @@ describe("handleClaudeSync", () => {
 		const updatedAccounts = JSON.parse(readFileSync(claudeAccountsPath, "utf-8"));
 		const updatedAccount = updatedAccounts.accounts.find(a => a.label === activeLabel);
 		expect(updatedAccount.oauthToken).toBe(fresherAccess);
+		expect(updatedAccount.oauthExpiresAt).toBe(fresherExpires);
+	});
+
+	test("sync recovers from OpenCode when refresh fails and tokens diverge", async () => {
+		const activeLabel = "claude-sync-recover";
+		const expiredAccess = "expired_oauth_token";
+		const expiredRefresh = "expired_refresh_token";
+		const expiredExpiresAt = Date.now() - 60 * 1000;
+		const fresherAccess = "fresher_oauth_token";
+		const fresherRefresh = "fresher_refresh_token";
+		const fresherExpires = Date.now() + 60 * 60 * 1000;
+
+		writeJsonFile(claudeAccountsPath, {
+			schemaVersion: 2,
+			activeLabel,
+			accounts: [
+				{
+					label: activeLabel,
+					oauthToken: expiredAccess,
+					oauthRefreshToken: expiredRefresh,
+					oauthExpiresAt: expiredExpiresAt,
+				},
+			],
+		});
+
+		writeJsonFile(opencodeAuthPath, {
+			anthropic: {
+				type: "oauth",
+				access: fresherAccess,
+				refresh: fresherRefresh,
+				expires: fresherExpires,
+			},
+		});
+
+		globalThis.fetch = async (url) => {
+			if (url === "https://console.anthropic.com/v1/oauth/token") {
+				return new Response("expired", { status: 400 });
+			}
+			return new Response("Not found", { status: 404 });
+		};
+
+		await handleClaudeSync([], { json: true, dryRun: false });
+
+		expect(exitCode).toBeNull();
+		const jsonEntry = consoleOutput.log.find(entry => entry.startsWith("{"));
+		expect(jsonEntry).toBeDefined();
+		const output = JSON.parse(jsonEntry);
+		expect(output.success).toBe(true);
+		expect(output.pulled).toContain(opencodeAuthPath);
+		expect(output.warnings.join(" ")).toContain("recovered tokens");
+
+		const updatedAccounts = JSON.parse(readFileSync(claudeAccountsPath, "utf-8"));
+		const updatedAccount = updatedAccounts.accounts.find(a => a.label === activeLabel);
+		expect(updatedAccount.oauthToken).toBe(fresherAccess);
+		expect(updatedAccount.oauthRefreshToken).toBe(fresherRefresh);
 		expect(updatedAccount.oauthExpiresAt).toBe(fresherExpires);
 	});
 });

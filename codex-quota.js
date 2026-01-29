@@ -4139,25 +4139,67 @@ function isClaudeOauthTokenExpiring(expiresAt) {
 	return expiresAt <= Date.now() + CLAUDE_OAUTH_REFRESH_BUFFER_MS;
 }
 
+function resolveClaudeOauthAccountFields(account) {
+	const usesOauthShape = Boolean(
+		account
+		&& typeof account === "object"
+		&& (
+			"oauthToken" in account
+			|| "oauthRefreshToken" in account
+			|| "oauthExpiresAt" in account
+			|| "oauthScopes" in account
+		)
+	);
+	const accessToken = usesOauthShape ? account.oauthToken : account.accessToken;
+	const refreshToken = usesOauthShape ? account.oauthRefreshToken : account.refreshToken;
+	const expiresAt = usesOauthShape ? account.oauthExpiresAt : account.expiresAt;
+	const scopes = usesOauthShape ? account.oauthScopes : account.scopes;
+	return { usesOauthShape, accessToken, refreshToken, expiresAt, scopes };
+}
+
 /**
  * Ensure a Claude OAuth access token is fresh, refreshing and persisting if needed.
- * @param {{ label: string, accessToken: string, refreshToken?: string | null, expiresAt?: number | null, scopes?: string[] | null, source?: string }} account
+ * Supports account objects with either accessToken/refreshToken or oauthToken/oauthRefreshToken fields.
+ * @param {{ label: string, accessToken?: string, refreshToken?: string | null, expiresAt?: number | null, scopes?: string[] | null, oauthToken?: string, oauthRefreshToken?: string | null, oauthExpiresAt?: number | null, oauthScopes?: string[] | null, source?: string }} account
  * @returns {Promise<boolean>}
  */
 async function ensureFreshClaudeOAuthToken(account) {
-	if (!isClaudeOauthTokenExpiring(account.expiresAt)) return true;
-	if (!account.refreshToken) return false;
+	const fields = resolveClaudeOauthAccountFields(account);
+	if (!isClaudeOauthTokenExpiring(fields.expiresAt)) return true;
+	if (!fields.refreshToken) return false;
 
-	const previousAccessToken = account.accessToken;
-	const previousRefreshToken = account.refreshToken;
+	const previousAccessToken = fields.accessToken;
+	const previousRefreshToken = fields.refreshToken;
 
 	try {
-		const refreshed = await refreshClaudeToken(account.refreshToken);
+		const refreshed = await refreshClaudeToken(fields.refreshToken);
 		if (!refreshed?.accessToken) return false;
-		account.accessToken = refreshed.accessToken;
-		account.refreshToken = refreshed.refreshToken ?? account.refreshToken;
-		account.expiresAt = Date.now() + refreshed.expiresIn * 1000;
-		persistClaudeOAuthTokens(account, {
+		const updatedAccessToken = refreshed.accessToken;
+		const updatedRefreshToken = refreshed.refreshToken ?? fields.refreshToken;
+		const updatedExpiresAt = Date.now() + refreshed.expiresIn * 1000;
+		if (fields.usesOauthShape) {
+			account.oauthToken = updatedAccessToken;
+			account.oauthRefreshToken = updatedRefreshToken;
+			account.oauthExpiresAt = updatedExpiresAt;
+			if (fields.scopes && !account.oauthScopes) {
+				account.oauthScopes = fields.scopes;
+			}
+		} else {
+			account.accessToken = updatedAccessToken;
+			account.refreshToken = updatedRefreshToken;
+			account.expiresAt = updatedExpiresAt;
+			if (fields.scopes && !account.scopes) {
+				account.scopes = fields.scopes;
+			}
+		}
+		persistClaudeOAuthTokens({
+			label: account.label,
+			accessToken: updatedAccessToken,
+			refreshToken: updatedRefreshToken,
+			expiresAt: updatedExpiresAt,
+			scopes: fields.scopes ?? null,
+			source: account.source,
+		}, {
 			previousAccessToken,
 			previousRefreshToken,
 		});
@@ -5452,6 +5494,51 @@ function findFresherClaudeOAuthStore(activeAccount) {
 }
 
 /**
+ * Find a consistent Claude OAuth store to recover from when refresh fails.
+ * Returns null when CLI stores disagree on token identity.
+ * @returns {{ store: { name: string, path: string, tokens: { access: string, refresh: string | null, expires: number | null, scopes: string[] | null } } | null, reason: string | null }}
+ */
+function findClaudeOAuthRecoveryStore() {
+	const stores = [
+		readClaudeCodeOauthStore(),
+		readOpencodeClaudeOauthStore(),
+		readPiClaudeOauthStore(),
+	];
+	const candidates = stores.filter(store => store.exists && store.tokens && (store.tokens.access || store.tokens.refresh));
+	if (!candidates.length) {
+		return { store: null, reason: "no-stores" };
+	}
+	const fingerprints = new Set();
+	for (const store of candidates) {
+		const token = store.tokens.refresh ?? store.tokens.access ?? null;
+		if (token) fingerprints.add(token);
+	}
+	if (fingerprints.size > 1) {
+		return { store: null, reason: "ambiguous" };
+	}
+	let bestStore = null;
+	let bestExpires = 0;
+	for (const store of candidates) {
+		const expires = typeof store.tokens.expires === "number" ? store.tokens.expires : 0;
+		if (!bestStore || expires > bestExpires) {
+			bestStore = store;
+			bestExpires = expires;
+		}
+	}
+	if (!bestStore) {
+		return { store: null, reason: "no-stores" };
+	}
+	return {
+		store: {
+			name: bestStore.name,
+			path: bestStore.path,
+			tokens: bestStore.tokens,
+		},
+		reason: null,
+	};
+}
+
+/**
  * Get the currently active account_id from ~/.codex/auth.json
  * @returns {string | null} Active account ID or null if not found
  */
@@ -6415,15 +6502,68 @@ async function handleClaudeSync(args, flags) {
 		}
 
 		if (!dryRun) {
-			const tokenOk = await ensureFreshClaudeOAuthToken(account);
+			let tokenOk = await ensureFreshClaudeOAuthToken(account);
 			if (!tokenOk) {
-				const message = `Failed to refresh Claude OAuth token for "${activeLabel}".`;
-				if (flags.json) {
-					console.log(JSON.stringify({ success: false, error: message, activeLabel }, null, 2));
-				} else {
-					console.error(colorize(`Error: ${message}`, RED));
+				const recovery = findClaudeOAuthRecoveryStore();
+				const recoveryStore = recovery.store;
+				const recoveryTokens = recoveryStore?.tokens ?? null;
+				const activeExpires = account.oauthExpiresAt ?? 0;
+				const recoveryExpires = recoveryTokens?.expires ?? 0;
+				const recoveryIsNewer = Boolean(recoveryExpires && (!activeExpires || recoveryExpires > activeExpires));
+				const recoveryHasAccess = Boolean(recoveryTokens?.access);
+				let recovered = false;
+
+				if (recoveryStore && recoveryTokens && recoveryHasAccess && (recoveryIsNewer || !activeExpires)) {
+					const previousTokens = {
+						previousAccessToken: account.oauthToken,
+						previousRefreshToken: account.oauthRefreshToken,
+					};
+					const updatedAccount = {
+						label: account.label,
+						accessToken: recoveryTokens.access,
+						refreshToken: recoveryTokens.refresh,
+						expiresAt: recoveryTokens.expires,
+						scopes: recoveryTokens.scopes ?? account.oauthScopes,
+						source: account.source,
+					};
+					const persistResult = persistClaudeOAuthTokens(updatedAccount, previousTokens);
+					if (persistResult.updatedPaths.length > 0) {
+						pulledPaths.push(recoveryStore.path);
+						account = {
+							...account,
+							oauthToken: recoveryTokens.access,
+							oauthRefreshToken: recoveryTokens.refresh,
+							oauthExpiresAt: recoveryTokens.expires,
+							oauthScopes: recoveryTokens.scopes ?? account.oauthScopes,
+						};
+						recovered = true;
+					}
+					if (persistResult.errors.length > 0) {
+						warnings.push(...persistResult.errors);
+					}
+					if (recovered) {
+						warnings.push(
+							`Claude OAuth refresh failed; recovered tokens from ${shortenPath(recoveryStore.path)}.`
+						);
+					}
 				}
-				process.exit(1);
+
+				tokenOk = recovered;
+				if (!tokenOk) {
+					let detail = "";
+					if (recovery.reason === "ambiguous") {
+						detail = " CLI auth stores disagree; refusing to overwrite.";
+					} else if (recovery.reason === "no-stores") {
+						detail = " No valid CLI auth stores found.";
+					}
+					const message = `Failed to refresh Claude OAuth token for "${activeLabel}".${detail}`;
+					if (flags.json) {
+						console.log(JSON.stringify({ success: false, error: message, activeLabel }, null, 2));
+					} else {
+						console.error(colorize(`Error: ${message}`, RED));
+					}
+					process.exit(1);
+				}
 			}
 		}
 
