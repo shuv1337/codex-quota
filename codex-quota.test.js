@@ -45,6 +45,9 @@ import {
 	persistOpenAiOAuthTokens,
 	detectCodexDivergence,
 	detectClaudeDivergence,
+	// Reverse-sync helpers
+	findFresherOpenAiOAuthStore,
+	findFresherClaudeOAuthStore,
 	// OpenAI OAuth utilities
 	generatePKCE,
 	generateState,
@@ -3412,6 +3415,67 @@ describe("handleCodexSync", () => {
 		expect(authAfter).toBe(authBefore);
 		expect(opencodeAfter).toBe(opencodeBefore);
 	});
+
+	test("sync pulls fresher token from OpenCode when refresh matches and expires is newer", async () => {
+		const activeLabel = "sync-reverse";
+		const accountId = "acc_sync_reverse";
+		const sharedRefresh = "shared_refresh_token";
+		// Active has older token
+		const activeAccess = createMockAccessToken(accountId, "sync@example.com");
+		const activeExpires = Date.now() + 1000;
+		// OpenCode has fresher token
+		const fresherAccess = createMockAccessToken(accountId, "sync@example.com");
+		const fresherExpires = Date.now() + 60 * 60 * 1000; // 1 hour
+
+		writeJsonFile(codexAccountsPath, {
+			schemaVersion: 4,
+			activeLabel,
+			accounts: [
+				{
+					label: activeLabel,
+					accountId,
+					access: activeAccess,
+					refresh: sharedRefresh,
+					expires: activeExpires,
+				},
+			],
+		});
+
+		writeJsonFile(testAuthPath, {
+			tokens: {
+				access_token: "cli_access",
+				refresh_token: "cli_refresh",
+				account_id: "cli_account",
+				expires_at: Math.floor((Date.now() + 1000) / 1000),
+			},
+		});
+
+		writeJsonFile(opencodeAuthPath, {
+			openai: {
+				type: "oauth",
+				access: fresherAccess,
+				refresh: sharedRefresh,
+				expires: fresherExpires,
+				accountId,
+			},
+		});
+
+		await handleCodexSync([], { json: true, dryRun: false });
+
+		expect(exitCode).toBeNull();
+		const jsonEntry = consoleOutput.log.find(entry => entry.startsWith("{"));
+		expect(jsonEntry).toBeDefined();
+		const output = JSON.parse(jsonEntry);
+		expect(output.success).toBe(true);
+		expect(output.pulled).toBeDefined();
+		expect(output.pulled).toContain(opencodeAuthPath);
+
+		// Verify the multi-account file was updated with the fresher token
+		const updatedAccounts = JSON.parse(readFileSync(codexAccountsPath, "utf-8"));
+		const updatedAccount = updatedAccounts.accounts.find(a => a.label === activeLabel);
+		expect(updatedAccount.access).toBe(fresherAccess);
+		expect(updatedAccount.expires).toBe(fresherExpires);
+	});
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3585,6 +3649,384 @@ describe("handleClaudeSync", () => {
 		const divergence = detectClaudeDivergence();
 		expect(divergence.skipped).toBe(true);
 		expect(divergence.skipReason).toBe("active-account-not-oauth");
+	});
+
+	test("sync pulls fresher token from OpenCode when refresh matches and expires is newer", async () => {
+		const activeLabel = "claude-sync-reverse";
+		const sharedRefresh = "shared_claude_refresh";
+		// Active has older token
+		const activeAccess = "active_oauth_token";
+		const activeExpires = Date.now() + 1000;
+		// OpenCode has fresher token
+		const fresherAccess = "fresher_oauth_token";
+		const fresherExpires = Date.now() + 60 * 60 * 1000; // 1 hour
+
+		writeJsonFile(claudeAccountsPath, {
+			schemaVersion: 2,
+			activeLabel,
+			accounts: [
+				{
+					label: activeLabel,
+					oauthToken: activeAccess,
+					oauthRefreshToken: sharedRefresh,
+					oauthExpiresAt: activeExpires,
+				},
+			],
+		});
+
+		writeJsonFile(credentialsPath, {
+			claudeAiOauth: {
+				accessToken: "cli_access",
+				refreshToken: "cli_refresh",
+				expiresAt: Date.now() + 1000,
+			},
+		});
+
+		writeJsonFile(opencodeAuthPath, {
+			anthropic: {
+				type: "oauth",
+				access: fresherAccess,
+				refresh: sharedRefresh,
+				expires: fresherExpires,
+			},
+		});
+
+		await handleClaudeSync([], { json: true, dryRun: false });
+
+		expect(exitCode).toBeNull();
+		const jsonEntry = consoleOutput.log.find(entry => entry.startsWith("{"));
+		expect(jsonEntry).toBeDefined();
+		const output = JSON.parse(jsonEntry);
+		expect(output.success).toBe(true);
+		expect(output.pulled).toBeDefined();
+		expect(output.pulled).toContain(opencodeAuthPath);
+
+		// Verify the multi-account file was updated with the fresher token
+		const updatedAccounts = JSON.parse(readFileSync(claudeAccountsPath, "utf-8"));
+		const updatedAccount = updatedAccounts.accounts.find(a => a.label === activeLabel);
+		expect(updatedAccount.oauthToken).toBe(fresherAccess);
+		expect(updatedAccount.oauthExpiresAt).toBe(fresherExpires);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reverse-sync helper tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("findFresherOpenAiOAuthStore", () => {
+	const testDir = join(tmpdir(), "openai-fresher-" + Date.now());
+	const testAuthPath = join(testDir, ".codex", "auth.json");
+	const opencodeAuthPath = join(testDir, "opencode", "auth.json");
+	const piAuthPath = join(testDir, ".pi", "agent", "auth.json");
+	let originalCodexAuthPath;
+	let originalXdgDataHome;
+	let originalPiAuthPath;
+
+	beforeEach(() => {
+		originalCodexAuthPath = process.env.CODEX_AUTH_PATH;
+		originalXdgDataHome = process.env.XDG_DATA_HOME;
+		originalPiAuthPath = process.env.PI_AUTH_PATH;
+		process.env.CODEX_AUTH_PATH = testAuthPath;
+		process.env.XDG_DATA_HOME = testDir;
+		process.env.PI_AUTH_PATH = piAuthPath;
+		mkdirSync(dirname(testAuthPath), { recursive: true });
+		mkdirSync(dirname(opencodeAuthPath), { recursive: true });
+		mkdirSync(dirname(piAuthPath), { recursive: true });
+	});
+
+	afterEach(() => {
+		if (originalCodexAuthPath === undefined) {
+			delete process.env.CODEX_AUTH_PATH;
+		} else {
+			process.env.CODEX_AUTH_PATH = originalCodexAuthPath;
+		}
+		if (originalXdgDataHome === undefined) {
+			delete process.env.XDG_DATA_HOME;
+		} else {
+			process.env.XDG_DATA_HOME = originalXdgDataHome;
+		}
+		if (originalPiAuthPath === undefined) {
+			delete process.env.PI_AUTH_PATH;
+		} else {
+			process.env.PI_AUTH_PATH = originalPiAuthPath;
+		}
+		rmSync(testDir, { recursive: true, force: true });
+	});
+
+	test("returns fresher=false when no CLI stores exist", () => {
+		const activeAccount = {
+			refresh: "refresh_token",
+			expires: Date.now() + 1000,
+			access: "access_token",
+		};
+		const result = findFresherOpenAiOAuthStore(activeAccount);
+		expect(result.fresher).toBe(false);
+		expect(result.store).toBeNull();
+	});
+
+	test("returns fresher=false when refresh tokens do not match", () => {
+		writeJsonFile(opencodeAuthPath, {
+			openai: {
+				access: "newer_access",
+				refresh: "different_refresh",
+				expires: Date.now() + 10000,
+			},
+		});
+
+		const activeAccount = {
+			refresh: "active_refresh",
+			expires: Date.now() + 1000,
+			access: "active_access",
+		};
+		const result = findFresherOpenAiOAuthStore(activeAccount);
+		expect(result.fresher).toBe(false);
+		expect(result.store).toBeNull();
+	});
+
+	test("returns fresher=true when OpenCode has same refresh but newer expires", () => {
+		const sharedRefresh = "shared_refresh_token";
+		const activeExpires = Date.now() + 1000;
+		const newerExpires = Date.now() + 10000;
+
+		writeJsonFile(opencodeAuthPath, {
+			openai: {
+				access: "newer_access",
+				refresh: sharedRefresh,
+				expires: newerExpires,
+				accountId: "acc_newer",
+			},
+		});
+
+		const activeAccount = {
+			refresh: sharedRefresh,
+			expires: activeExpires,
+			access: "active_access",
+		};
+		const result = findFresherOpenAiOAuthStore(activeAccount);
+		expect(result.fresher).toBe(true);
+		expect(result.store).not.toBeNull();
+		expect(result.store.name).toBe("opencode");
+		expect(result.store.tokens.access).toBe("newer_access");
+		expect(result.store.tokens.expires).toBe(newerExpires);
+	});
+
+	test("returns fresher=true when pi has same refresh but newer expires", () => {
+		const sharedRefresh = "shared_refresh_token";
+		const activeExpires = Date.now() + 1000;
+		const newerExpires = Date.now() + 10000;
+
+		writeJsonFile(piAuthPath, {
+			"openai-codex": {
+				access: "pi_newer_access",
+				refresh: sharedRefresh,
+				expires: newerExpires,
+				accountId: "acc_pi",
+			},
+		});
+
+		const activeAccount = {
+			refresh: sharedRefresh,
+			expires: activeExpires,
+			access: "active_access",
+		};
+		const result = findFresherOpenAiOAuthStore(activeAccount);
+		expect(result.fresher).toBe(true);
+		expect(result.store).not.toBeNull();
+		expect(result.store.name).toBe("pi");
+		expect(result.store.tokens.access).toBe("pi_newer_access");
+	});
+
+	test("returns the freshest store when multiple stores have newer tokens", () => {
+		const sharedRefresh = "shared_refresh_token";
+		const activeExpires = Date.now() + 1000;
+		const opcodeExpires = Date.now() + 5000;
+		const piExpires = Date.now() + 10000;
+
+		writeJsonFile(opencodeAuthPath, {
+			openai: {
+				access: "opencode_access",
+				refresh: sharedRefresh,
+				expires: opcodeExpires,
+			},
+		});
+
+		writeJsonFile(piAuthPath, {
+			"openai-codex": {
+				access: "pi_access",
+				refresh: sharedRefresh,
+				expires: piExpires,
+			},
+		});
+
+		const activeAccount = {
+			refresh: sharedRefresh,
+			expires: activeExpires,
+			access: "active_access",
+		};
+		const result = findFresherOpenAiOAuthStore(activeAccount);
+		expect(result.fresher).toBe(true);
+		expect(result.store).not.toBeNull();
+		// pi has the newest expires
+		expect(result.store.name).toBe("pi");
+		expect(result.store.tokens.access).toBe("pi_access");
+	});
+
+	test("returns fresher=false when active has no refresh token", () => {
+		writeJsonFile(opencodeAuthPath, {
+			openai: {
+				access: "newer_access",
+				refresh: "some_refresh",
+				expires: Date.now() + 10000,
+			},
+		});
+
+		const activeAccount = {
+			refresh: null,
+			expires: Date.now() + 1000,
+			access: "active_access",
+		};
+		const result = findFresherOpenAiOAuthStore(activeAccount);
+		expect(result.fresher).toBe(false);
+	});
+});
+
+describe("findFresherClaudeOAuthStore", () => {
+	const testDir = join(tmpdir(), "claude-fresher-" + Date.now());
+	const credentialsPath = join(testDir, ".claude", ".credentials.json");
+	const opencodeAuthPath = join(testDir, "opencode", "auth.json");
+	const piAuthPath = join(testDir, ".pi", "agent", "auth.json");
+	let originalCredentialsPath;
+	let originalXdgDataHome;
+	let originalPiAuthPath;
+
+	beforeEach(() => {
+		originalCredentialsPath = process.env.CLAUDE_CREDENTIALS_PATH;
+		originalXdgDataHome = process.env.XDG_DATA_HOME;
+		originalPiAuthPath = process.env.PI_AUTH_PATH;
+		process.env.CLAUDE_CREDENTIALS_PATH = credentialsPath;
+		process.env.XDG_DATA_HOME = testDir;
+		process.env.PI_AUTH_PATH = piAuthPath;
+		mkdirSync(dirname(credentialsPath), { recursive: true });
+		mkdirSync(dirname(opencodeAuthPath), { recursive: true });
+		mkdirSync(dirname(piAuthPath), { recursive: true });
+	});
+
+	afterEach(() => {
+		if (originalCredentialsPath === undefined) {
+			delete process.env.CLAUDE_CREDENTIALS_PATH;
+		} else {
+			process.env.CLAUDE_CREDENTIALS_PATH = originalCredentialsPath;
+		}
+		if (originalXdgDataHome === undefined) {
+			delete process.env.XDG_DATA_HOME;
+		} else {
+			process.env.XDG_DATA_HOME = originalXdgDataHome;
+		}
+		if (originalPiAuthPath === undefined) {
+			delete process.env.PI_AUTH_PATH;
+		} else {
+			process.env.PI_AUTH_PATH = originalPiAuthPath;
+		}
+		rmSync(testDir, { recursive: true, force: true });
+	});
+
+	test("returns fresher=false when no CLI stores exist", () => {
+		const activeAccount = {
+			oauthRefreshToken: "refresh_token",
+			oauthExpiresAt: Date.now() + 1000,
+			oauthToken: "access_token",
+		};
+		const result = findFresherClaudeOAuthStore(activeAccount);
+		expect(result.fresher).toBe(false);
+		expect(result.store).toBeNull();
+	});
+
+	test("returns fresher=false when refresh tokens do not match", () => {
+		writeJsonFile(opencodeAuthPath, {
+			anthropic: {
+				access: "newer_access",
+				refresh: "different_refresh",
+				expires: Date.now() + 10000,
+			},
+		});
+
+		const activeAccount = {
+			oauthRefreshToken: "active_refresh",
+			oauthExpiresAt: Date.now() + 1000,
+			oauthToken: "active_access",
+		};
+		const result = findFresherClaudeOAuthStore(activeAccount);
+		expect(result.fresher).toBe(false);
+		expect(result.store).toBeNull();
+	});
+
+	test("returns fresher=true when OpenCode has same refresh but newer expires", () => {
+		const sharedRefresh = "shared_refresh_token";
+		const activeExpires = Date.now() + 1000;
+		const newerExpires = Date.now() + 10000;
+
+		writeJsonFile(opencodeAuthPath, {
+			anthropic: {
+				access: "newer_access",
+				refresh: sharedRefresh,
+				expires: newerExpires,
+			},
+		});
+
+		const activeAccount = {
+			oauthRefreshToken: sharedRefresh,
+			oauthExpiresAt: activeExpires,
+			oauthToken: "active_access",
+		};
+		const result = findFresherClaudeOAuthStore(activeAccount);
+		expect(result.fresher).toBe(true);
+		expect(result.store).not.toBeNull();
+		expect(result.store.name).toBe("opencode");
+		expect(result.store.tokens.access).toBe("newer_access");
+		expect(result.store.tokens.expires).toBe(newerExpires);
+	});
+
+	test("returns fresher=true when Claude Code has same refresh but newer expires", () => {
+		const sharedRefresh = "shared_refresh_token";
+		const activeExpires = Date.now() + 1000;
+		const newerExpires = Date.now() + 10000;
+
+		writeJsonFile(credentialsPath, {
+			claudeAiOauth: {
+				accessToken: "claude_code_access",
+				refreshToken: sharedRefresh,
+				expiresAt: newerExpires,
+			},
+		});
+
+		const activeAccount = {
+			oauthRefreshToken: sharedRefresh,
+			oauthExpiresAt: activeExpires,
+			oauthToken: "active_access",
+		};
+		const result = findFresherClaudeOAuthStore(activeAccount);
+		expect(result.fresher).toBe(true);
+		expect(result.store).not.toBeNull();
+		expect(result.store.name).toBe("claude-code");
+		expect(result.store.tokens.access).toBe("claude_code_access");
+	});
+
+	test("returns fresher=false when active has no refresh token", () => {
+		writeJsonFile(opencodeAuthPath, {
+			anthropic: {
+				access: "newer_access",
+				refresh: "some_refresh",
+				expires: Date.now() + 10000,
+			},
+		});
+
+		const activeAccount = {
+			oauthRefreshToken: null,
+			oauthExpiresAt: Date.now() + 1000,
+			oauthToken: "active_access",
+		};
+		const result = findFresherClaudeOAuthStore(activeAccount);
+		expect(result.fresher).toBe(false);
 	});
 });
 

@@ -1180,11 +1180,13 @@ function normalizeClaudeOauthEntryTokens(entry) {
 			?? entry?.oauth_token
 			?? entry?.accessToken
 			?? entry?.access_token
+			?? entry?.access  // OpenCode/pi anthropic format
 			?? null,
 		refresh: entry?.oauthRefreshToken
 			?? entry?.oauth_refresh_token
 			?? entry?.refreshToken
 			?? entry?.refresh_token
+			?? entry?.refresh  // OpenCode/pi anthropic format
 			?? null,
 		scopes: entry?.oauthScopes
 			?? entry?.oauth_scopes
@@ -1194,6 +1196,7 @@ function normalizeClaudeOauthEntryTokens(entry) {
 			?? entry?.oauth_expires_at
 			?? entry?.expiresAt
 			?? entry?.expires_at
+			?? entry?.expires  // OpenCode/pi anthropic format
 			?? null,
 	};
 }
@@ -4543,7 +4546,9 @@ async function handleSwitch(args, flags) {
 }
 
 /**
- * Handle sync subcommand - sync the activeLabel account to CLI auth files
+ * Handle sync subcommand - bi-directional sync for activeLabel account
+ * 1. Pull: if a CLI store has the same refresh token but newer access/expires, pull it back
+ * 2. Push: write the (now freshest) account tokens to all CLI auth files
  * @param {string[]} args - Non-flag arguments (unused)
  * @param {{ json: boolean, dryRun?: boolean }} flags - Parsed flags
  */
@@ -4562,7 +4567,7 @@ async function handleCodexSync(args, flags) {
 			process.exit(1);
 		}
 
-		const account = divergence.activeAccount ?? findCodexAccountByLabelInFiles(activeLabel);
+		let account = divergence.activeAccount ?? findCodexAccountByLabelInFiles(activeLabel);
 		if (!account) {
 			const message = `Active label "${activeLabel}" could not be resolved in multi-account files.`;
 			if (flags.json) {
@@ -4571,6 +4576,43 @@ async function handleCodexSync(args, flags) {
 				console.error(colorize(`Error: ${message}`, RED));
 			}
 			process.exit(1);
+		}
+
+		const pulledPaths = [];
+		const warnings = [];
+
+		// Reverse-sync: check if any CLI store has a fresher token
+		const fresherResult = findFresherOpenAiOAuthStore(account);
+		if (fresherResult.fresher && fresherResult.store) {
+			const fresherStore = fresherResult.store;
+			const fresherTokens = fresherStore.tokens;
+			if (!dryRun) {
+				// Update the account entry in the multi-account file with the fresher token
+				const previousTokens = {
+					previousAccessToken: account.access,
+					previousRefreshToken: account.refresh,
+				};
+				const updatedAccount = {
+					label: account.label,
+					access: fresherTokens.access,
+					refresh: fresherTokens.refresh,
+					expires: fresherTokens.expires,
+					accountId: fresherTokens.accountId ?? account.accountId,
+					idToken: fresherTokens.idToken ?? account.idToken,
+					source: account.source,
+				};
+				const persistResult = persistOpenAiOAuthTokens(updatedAccount, previousTokens);
+				if (persistResult.updatedPaths.length > 0) {
+					pulledPaths.push(fresherStore.path);
+					// Update the account reference with the fresher tokens for forward push
+					account = { ...account, ...updatedAccount };
+				}
+				if (persistResult.errors.length > 0) {
+					warnings.push(...persistResult.errors);
+				}
+			} else {
+				pulledPaths.push(fresherStore.path);
+			}
 		}
 
 		if (!dryRun) {
@@ -4591,7 +4633,6 @@ async function handleCodexSync(args, flags) {
 		const email = profile.email ?? null;
 		const updatedPaths = [];
 		const skippedPaths = [];
-		const warnings = [];
 
 		const codexAuthPath = getCodexCliAuthPath();
 		if (dryRun) {
@@ -4674,6 +4715,7 @@ async function handleCodexSync(args, flags) {
 				activeLabel,
 				email,
 				accountId: account.accountId,
+				pulled: pulledPaths,
 				updated: updatedPaths,
 				skipped: skippedPaths,
 				warnings,
@@ -4688,6 +4730,13 @@ async function handleCodexSync(args, flags) {
 		];
 		if (dryRun) {
 			lines.push("Dry run: no files were written.");
+			lines.push("");
+		}
+		if (pulledPaths.length) {
+			lines.push("Pulled fresher token from:");
+			for (const path of pulledPaths) {
+				lines.push(`  ${shortenPath(path)}`);
+			}
 			lines.push("");
 		}
 		lines.push("Updated:");
@@ -5200,6 +5249,205 @@ function detectClaudeDivergence() {
 		skipped: false,
 		skipReason: null,
 		stores,
+	};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reverse-sync helpers (pull fresher tokens from CLI stores)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Read OpenAI OAuth tokens from OpenCode auth.json.
+ * @returns {{ name: string, path: string, exists: boolean, tokens: ReturnType<typeof normalizeOpenAiOauthEntryTokens> | null }}
+ */
+function readOpencodeOpenAiOauthStore() {
+	const path = getOpencodeAuthPath();
+	if (!existsSync(path)) {
+		return { name: "opencode", path, exists: false, tokens: null };
+	}
+	try {
+		const raw = readFileSync(path, "utf-8");
+		const parsed = JSON.parse(raw);
+		const openai = parsed?.openai ?? {};
+		return { name: "opencode", path, exists: true, tokens: normalizeOpenAiOauthEntryTokens(openai) };
+	} catch {
+		return { name: "opencode", path, exists: true, tokens: null };
+	}
+}
+
+/**
+ * Read OpenAI OAuth tokens from pi auth.json (openai-codex section).
+ * @returns {{ name: string, path: string, exists: boolean, tokens: ReturnType<typeof normalizeOpenAiOauthEntryTokens> | null }}
+ */
+function readPiOpenAiOauthStore() {
+	const path = getPiAuthPath();
+	if (!existsSync(path)) {
+		return { name: "pi", path, exists: false, tokens: null };
+	}
+	try {
+		const raw = readFileSync(path, "utf-8");
+		const parsed = JSON.parse(raw);
+		const codex = parsed?.["openai-codex"] ?? {};
+		return { name: "pi", path, exists: true, tokens: normalizeOpenAiOauthEntryTokens(codex) };
+	} catch {
+		return { name: "pi", path, exists: true, tokens: null };
+	}
+}
+
+/**
+ * Read OpenAI OAuth tokens from Codex CLI auth.json.
+ * @returns {{ name: string, path: string, exists: boolean, tokens: ReturnType<typeof normalizeOpenAiOauthEntryTokens> | null }}
+ */
+function readCodexCliOpenAiOauthStore() {
+	const cliAuth = readCodexCliAuth();
+	if (!cliAuth.exists || !cliAuth.tokens) {
+		return { name: "codex-cli", path: cliAuth.path, exists: cliAuth.exists, tokens: null };
+	}
+	// Codex CLI uses access_token/refresh_token/expires_at (seconds) format
+	const tokens = {
+		access: cliAuth.tokens.access_token ?? null,
+		refresh: cliAuth.tokens.refresh_token ?? null,
+		// Convert seconds to ms for consistency
+		expires: cliAuth.tokens.expires_at ? cliAuth.tokens.expires_at * 1000 : null,
+		accountId: cliAuth.tokens.account_id ?? cliAuth.tokens.accountId ?? null,
+		idToken: cliAuth.tokens.id_token ?? null,
+	};
+	return { name: "codex-cli", path: cliAuth.path, exists: true, tokens };
+}
+
+/**
+ * Find the CLI store with the freshest OpenAI OAuth token for the active account.
+ * Matches by refresh token; returns the store with the newest expires (or newest access if expires unavailable).
+ * @param {{ refresh: string, expires?: number, access?: string, accountId?: string }} activeAccount
+ * @returns {{ fresher: boolean, store: { name: string, path: string, tokens: { access: string, refresh: string, expires: number | null, accountId: string | null, idToken: string | null } } | null }}
+ */
+function findFresherOpenAiOAuthStore(activeAccount) {
+	const activeRefresh = activeAccount.refresh ?? null;
+	const activeExpires = activeAccount.expires ?? 0;
+	const activeAccess = activeAccount.access ?? null;
+
+	if (!activeRefresh) {
+		return { fresher: false, store: null };
+	}
+
+	const stores = [
+		readOpencodeOpenAiOauthStore(),
+		readPiOpenAiOauthStore(),
+		readCodexCliOpenAiOauthStore(),
+	];
+
+	let fresherStore = null;
+	let fresherExpires = activeExpires;
+	let fresherAccess = activeAccess;
+
+	for (const store of stores) {
+		if (!store.exists || !store.tokens) continue;
+		const storeRefresh = store.tokens.refresh ?? null;
+		const storeExpires = store.tokens.expires ?? 0;
+		const storeAccess = store.tokens.access ?? null;
+
+		// Must match refresh token
+		if (storeRefresh !== activeRefresh) continue;
+
+		// Compare by expires first (if both have it)
+		if (storeExpires && fresherExpires) {
+			if (storeExpires > fresherExpires) {
+				fresherStore = store;
+				fresherExpires = storeExpires;
+				fresherAccess = storeAccess;
+			}
+		} else if (storeExpires && !fresherExpires) {
+			// Store has expires, active doesn't - store is fresher
+			fresherStore = store;
+			fresherExpires = storeExpires;
+			fresherAccess = storeAccess;
+		} else if (storeAccess && storeAccess !== fresherAccess) {
+			// Neither has expires - fall back to access token difference
+			// Can't determine which is fresher without expires, but if different, prefer store
+			// (This is a heuristic: if access tokens differ, assume CLI was refreshed)
+			fresherStore = store;
+			fresherAccess = storeAccess;
+		}
+	}
+
+	if (!fresherStore) {
+		return { fresher: false, store: null };
+	}
+
+	return {
+		fresher: true,
+		store: {
+			name: fresherStore.name,
+			path: fresherStore.path,
+			tokens: fresherStore.tokens,
+		},
+	};
+}
+
+/**
+ * Find the CLI store with the freshest Claude OAuth token for the active account.
+ * Matches by refresh token; returns the store with the newest expires (or newest access if expires unavailable).
+ * @param {{ oauthRefreshToken?: string | null, oauthExpiresAt?: number | null, oauthToken?: string | null }} activeAccount
+ * @returns {{ fresher: boolean, store: { name: string, path: string, tokens: { access: string, refresh: string, expires: number | null, scopes: string[] | null } } | null }}
+ */
+function findFresherClaudeOAuthStore(activeAccount) {
+	const activeRefresh = activeAccount.oauthRefreshToken ?? null;
+	const activeExpires = activeAccount.oauthExpiresAt ?? 0;
+	const activeAccess = activeAccount.oauthToken ?? null;
+
+	if (!activeRefresh) {
+		return { fresher: false, store: null };
+	}
+
+	const stores = [
+		readClaudeCodeOauthStore(),
+		readOpencodeClaudeOauthStore(),
+		readPiClaudeOauthStore(),
+	];
+
+	let fresherStore = null;
+	let fresherExpires = activeExpires;
+	let fresherAccess = activeAccess;
+
+	for (const store of stores) {
+		if (!store.exists || !store.tokens) continue;
+		const storeRefresh = store.tokens.refresh ?? null;
+		const storeExpires = store.tokens.expires ?? 0;
+		const storeAccess = store.tokens.access ?? null;
+
+		// Must match refresh token
+		if (storeRefresh !== activeRefresh) continue;
+
+		// Compare by expires first (if both have it)
+		if (storeExpires && fresherExpires) {
+			if (storeExpires > fresherExpires) {
+				fresherStore = store;
+				fresherExpires = storeExpires;
+				fresherAccess = storeAccess;
+			}
+		} else if (storeExpires && !fresherExpires) {
+			// Store has expires, active doesn't - store is fresher
+			fresherStore = store;
+			fresherExpires = storeExpires;
+			fresherAccess = storeAccess;
+		} else if (storeAccess && storeAccess !== fresherAccess) {
+			// Neither has expires - fall back to access token difference
+			fresherStore = store;
+			fresherAccess = storeAccess;
+		}
+	}
+
+	if (!fresherStore) {
+		return { fresher: false, store: null };
+	}
+
+	return {
+		fresher: true,
+		store: {
+			name: fresherStore.name,
+			path: fresherStore.path,
+			tokens: fresherStore.tokens,
+		},
 	};
 }
 
@@ -6076,7 +6324,9 @@ async function handleClaudeSwitch(args, flags) {
 }
 
 /**
- * Handle Claude sync subcommand - sync the activeLabel account to CLI auth files
+ * Handle Claude sync subcommand - bi-directional sync for activeLabel account
+ * 1. Pull: if a CLI store has the same refresh token but newer access/expires, pull it back
+ * 2. Push: write the (now freshest) account tokens to all CLI auth files
  * @param {string[]} args - Non-flag arguments (unused)
  * @param {{ json: boolean, dryRun?: boolean }} flags - Parsed flags
  */
@@ -6094,7 +6344,7 @@ async function handleClaudeSync(args, flags) {
 			}
 			process.exit(1);
 		}
-		const account = active.account;
+		let account = active.account;
 		if (!account) {
 			const message = `Active label "${activeLabel}" could not be resolved in ~/.claude-accounts.json.`;
 			if (flags.json) {
@@ -6111,6 +6361,7 @@ async function handleClaudeSync(args, flags) {
 					success: true,
 					dryRun,
 					activeLabel,
+					pulled: [],
 					updated: [],
 					skipped: [],
 					warnings: [warning],
@@ -6119,6 +6370,48 @@ async function handleClaudeSync(args, flags) {
 				console.error(warning);
 			}
 			return;
+		}
+
+		const pulledPaths = [];
+		const warnings = [];
+
+		// Reverse-sync: check if any CLI store has a fresher token
+		const fresherResult = findFresherClaudeOAuthStore(account);
+		if (fresherResult.fresher && fresherResult.store) {
+			const fresherStore = fresherResult.store;
+			const fresherTokens = fresherStore.tokens;
+			if (!dryRun) {
+				// Update the account entry in the multi-account file with the fresher token
+				const previousTokens = {
+					previousAccessToken: account.oauthToken,
+					previousRefreshToken: account.oauthRefreshToken,
+				};
+				const updatedAccount = {
+					label: account.label,
+					accessToken: fresherTokens.access,
+					refreshToken: fresherTokens.refresh,
+					expiresAt: fresherTokens.expires,
+					scopes: fresherTokens.scopes ?? account.oauthScopes,
+					source: account.source,
+				};
+				const persistResult = persistClaudeOAuthTokens(updatedAccount, previousTokens);
+				if (persistResult.updatedPaths.length > 0) {
+					pulledPaths.push(fresherStore.path);
+					// Update the account reference with the fresher tokens for forward push
+					account = {
+						...account,
+						oauthToken: fresherTokens.access,
+						oauthRefreshToken: fresherTokens.refresh,
+						oauthExpiresAt: fresherTokens.expires,
+						oauthScopes: fresherTokens.scopes ?? account.oauthScopes,
+					};
+				}
+				if (persistResult.errors.length > 0) {
+					warnings.push(...persistResult.errors);
+				}
+			} else {
+				pulledPaths.push(fresherStore.path);
+			}
 		}
 
 		if (!dryRun) {
@@ -6136,7 +6429,6 @@ async function handleClaudeSync(args, flags) {
 
 		const updatedPaths = [];
 		const skippedPaths = [];
-		const warnings = [];
 
 		const credentialsPath = process.env.CLAUDE_CREDENTIALS_PATH || CLAUDE_CREDENTIALS_PATH;
 		if (dryRun) {
@@ -6191,6 +6483,7 @@ async function handleClaudeSync(args, flags) {
 				success: true,
 				dryRun,
 				activeLabel,
+				pulled: pulledPaths,
 				updated: updatedPaths,
 				skipped: skippedPaths,
 				warnings,
@@ -6204,6 +6497,13 @@ async function handleClaudeSync(args, flags) {
 		];
 		if (dryRun) {
 			lines.push("Dry run: no files were written.");
+			lines.push("");
+		}
+		if (pulledPaths.length) {
+			lines.push("Pulled fresher token from:");
+			for (const path of pulledPaths) {
+				lines.push(`  ${shortenPath(path)}`);
+			}
 			lines.push("");
 		}
 		lines.push("Updated:");
@@ -6931,6 +7231,13 @@ export {
 	// Divergence helpers (for testing)
 	detectCodexDivergence,
 	detectClaudeDivergence,
+
+	// Reverse-sync helpers (for testing)
+	findFresherOpenAiOAuthStore,
+	findFresherClaudeOAuthStore,
+	readOpencodeOpenAiOauthStore,
+	readPiOpenAiOauthStore,
+	readCodexCliOpenAiOauthStore,
 
 	// List helpers (for testing)
 	getActiveAccountId,
