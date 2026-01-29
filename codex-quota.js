@@ -3710,17 +3710,17 @@ function isHeadlessEnvironment() {
  * @returns {boolean} True if browser was opened, false if URL was printed
  */
 function openBrowser(url, options = {}) {
-	// If --no-browser flag or headless environment, print URL instead
+	// If --no-browser flag or headless environment, only print URL (don't open browser)
 	if (options.noBrowser || isHeadlessEnvironment()) {
 		console.log("\nOpen this URL in your browser to authenticate:");
 		console.log(`\n  ${url}\n`);
 		return false;
 	}
-	
+
 	// Platform-specific browser open commands
 	let cmd;
 	let args;
-	
+
 	switch (process.platform) {
 		case "darwin":
 			cmd = "open";
@@ -3736,18 +3736,20 @@ function openBrowser(url, options = {}) {
 			args = [url];
 			break;
 	}
-	
+
 	try {
 		// Spawn detached process so it doesn't block the CLI
 		const child = spawn(cmd, args, {
 			detached: true,
 			stdio: "ignore",
 		});
-		
+
 		// Unref to allow the parent process to exit independently
 		child.unref();
-		
+
 		console.log("\nOpening browser for authentication...");
+		console.log("\nIf the browser doesn't open, use this URL:");
+		console.log(`\n  ${url}\n`);
 		return true;
 	} catch {
 		// If spawn fails, fall back to printing URL
