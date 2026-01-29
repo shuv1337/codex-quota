@@ -3030,6 +3030,8 @@ Examples:
   ${PRIMARY_CMD} claude quota      Check quota for Claude accounts
   ${PRIMARY_CMD} codex add work    Add Codex account with label "work"
   ${PRIMARY_CMD} claude add work   Add Claude credential with label "work"
+  ${PRIMARY_CMD} codex reauth work Re-authenticate existing "work" account
+  ${PRIMARY_CMD} claude reauth work Re-authenticate existing "work" account
   ${PRIMARY_CMD} codex switch work Switch Codex/OpenCode/pi to "work"
   ${PRIMARY_CMD} claude switch work Switch Claude Code/OpenCode/pi to "work"
   ${PRIMARY_CMD} codex sync        Sync active Codex account to CLI auth files
