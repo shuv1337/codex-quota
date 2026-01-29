@@ -3062,6 +3062,7 @@ Usage:
 Commands:
   quota [label]     Check usage quota (default command)
   add [label]       Add a new account via OAuth browser flow
+  reauth <label>    Re-authenticate an existing account via OAuth
   switch <label>    Switch active account for Codex CLI, OpenCode, and pi
   sync              Sync activeLabel to Codex CLI, OpenCode, and pi
   list              List all accounts from all sources
@@ -3078,6 +3079,7 @@ Examples:
   ${PRIMARY_CMD} codex                   Check quota for Codex accounts
   ${PRIMARY_CMD} codex personal          Check quota for "personal" account
   ${PRIMARY_CMD} codex add work          Add new account with label "work"
+  ${PRIMARY_CMD} codex reauth work       Re-authenticate "work" account
   ${PRIMARY_CMD} codex switch personal   Switch to "personal" account
   ${PRIMARY_CMD} codex list              List all configured accounts
   ${PRIMARY_CMD} codex remove old        Remove "old" account
@@ -3099,6 +3101,7 @@ Usage:
 Commands:
   quota [label]     Check Claude usage (default command)
   add [label]       Add a Claude credential (via OAuth or manual entry)
+  reauth <label>    Re-authenticate an existing Claude account via OAuth
   switch <label>    Switch Claude Code, OpenCode, and pi credentials
   sync              Sync activeLabel to Claude Code, OpenCode, and pi
   list              List Claude credentials
@@ -3117,6 +3120,7 @@ Examples:
   ${PRIMARY_CMD} claude quota work        Check Claude usage for "work"
   ${PRIMARY_CMD} claude add               Add Claude credential (prompts for method)
   ${PRIMARY_CMD} claude add work --oauth  Add via OAuth browser flow
+  ${PRIMARY_CMD} claude reauth work       Re-authenticate "work" account
   ${PRIMARY_CMD} claude switch work       Switch Claude Code/OpenCode/pi to "work"
   ${PRIMARY_CMD} claude list              List Claude credentials
   ${PRIMARY_CMD} claude remove old        Remove Claude credential "old"
@@ -3165,6 +3169,46 @@ Examples:
   ${PRIMARY_CMD} claude add work --manual         Manual token entry
 	  ${PRIMARY_CMD} claude add work --oauth --no-browser  OAuth without opening browser
 	  ${PRIMARY_CMD} claude add work --json           JSON output for scripting
+`);
+}
+
+function printHelpClaudeReauth() {
+	console.log(`${PRIMARY_CMD} claude reauth - Re-authenticate an existing Claude account
+
+Usage:
+  ${PRIMARY_CMD} claude reauth <label> [options]
+
+Arguments:
+  label             Required. Label of the Claude account to re-authenticate
+
+Options:
+  --no-browser      Print the OAuth URL instead of opening browser
+                    Use this in headless/SSH environments
+  --json            Output result in JSON format
+  --help, -h        Show this help
+
+Description:
+  Re-authenticates an existing Claude account via the OAuth browser flow.
+  This is useful when your tokens have expired and cannot be refreshed,
+  or when you need to reset your authentication.
+
+  Unlike 'add', this command:
+    - Requires an existing account with the specified label
+    - Updates the existing entry instead of creating a new one
+    - Preserves any extra fields in the account configuration
+    - Always uses OAuth (no manual token entry)
+
+  If the re-authenticated account is the active account, CLI auth files
+  (Claude Code, OpenCode, pi) will also be updated automatically.
+
+Examples:
+  ${PRIMARY_CMD} claude reauth work                Re-authenticate "work" account
+  ${PRIMARY_CMD} claude reauth work --no-browser   Print URL for manual browser auth
+  ${PRIMARY_CMD} claude reauth work --json         JSON output for scripting
+
+See also:
+  ${PRIMARY_CMD} claude add     Add a new Claude account
+  ${PRIMARY_CMD} claude list    Show all configured Claude accounts
 `);
 }
 
@@ -3330,6 +3374,45 @@ Environment:
   SSH/headless environments are auto-detected. The URL will be printed
   instead of opening a browser when SSH_CLIENT or SSH_TTY is set, or
   when DISPLAY/WAYLAND_DISPLAY is missing on Linux.
+`);
+}
+
+function printHelpCodexReauth() {
+	console.log(`${PRIMARY_CMD} codex reauth - Re-authenticate an existing account
+
+Usage:
+  ${PRIMARY_CMD} codex reauth <label> [options]
+
+Arguments:
+  label             Required. Label of the account to re-authenticate
+
+Options:
+  --no-browser      Print the auth URL instead of opening browser
+                    Use this in headless/SSH environments
+  --json            Output result in JSON format
+  --help, -h        Show this help
+
+Description:
+  Re-authenticates an existing Codex account via the OAuth browser flow.
+  This is useful when your tokens have expired and cannot be refreshed,
+  or when you need to reset your authentication.
+
+  Unlike 'add', this command:
+    - Requires an existing account with the specified label
+    - Updates the existing entry instead of creating a new one
+    - Preserves any extra fields in the account configuration
+
+  If the re-authenticated account is the active account, CLI auth files
+  (Codex CLI, OpenCode, pi) will also be updated automatically.
+
+Examples:
+  ${PRIMARY_CMD} codex reauth work                Re-authenticate "work" account
+  ${PRIMARY_CMD} codex reauth work --no-browser   Print URL for manual browser auth
+  ${PRIMARY_CMD} codex reauth work --json         JSON output for scripting
+
+See also:
+  ${PRIMARY_CMD} codex add     Add a new account
+  ${PRIMARY_CMD} codex list    Show all configured accounts
 `);
 }
 
@@ -4394,6 +4477,210 @@ async function handleAdd(args, flags) {
 			console.error(colorize(`Error: ${error.message}`, RED));
 		}
 		
+		process.exit(1);
+	}
+}
+
+/**
+ * Handle reauth subcommand - re-authenticate an existing Codex account via OAuth browser flow
+ * This updates the existing account's tokens without changing the label
+ * @param {string[]} args - Non-flag arguments (label is required)
+ * @param {{ json: boolean, noBrowser: boolean }} flags - Parsed flags
+ */
+async function handleCodexReauth(args, flags) {
+	const label = args[0];
+	if (!label) {
+		if (flags.json) {
+			console.log(JSON.stringify({ success: false, error: "Missing required label argument" }, null, 2));
+		} else {
+			console.error(colorize(`Usage: ${PRIMARY_CMD} codex reauth <label>`, RED));
+			console.error("Re-authenticates an existing account via OAuth browser flow.");
+		}
+		process.exit(1);
+	}
+
+	try {
+		// 1. Find existing account by label
+		const existingAccount = findAccountByLabel(label);
+		if (!existingAccount) {
+			const allLabels = getAllLabels();
+			if (flags.json) {
+				console.log(JSON.stringify({
+					success: false,
+					error: `Account "${label}" not found`,
+					availableLabels: allLabels,
+				}, null, 2));
+			} else if (allLabels.length === 0) {
+				console.error(colorize(`Account "${label}" not found. No accounts configured.`, RED));
+				console.error(`Run '${PRIMARY_CMD} codex add' to add an account.`);
+			} else {
+				console.error(colorize(`Account "${label}" not found.`, RED));
+				console.error(`Available: ${allLabels.join(", ")}`);
+			}
+			process.exit(1);
+		}
+
+		const source = existingAccount.source;
+
+		// 2. Check if account can be re-authenticated (must be in a multi-account file)
+		if (source === "env") {
+			if (flags.json) {
+				console.log(JSON.stringify({
+					success: false,
+					error: "Cannot re-authenticate account from CODEX_ACCOUNTS env var. Modify the env var directly.",
+				}, null, 2));
+			} else {
+				console.error(colorize("Cannot re-authenticate account from CODEX_ACCOUNTS env var.", RED));
+				console.error("Modify the env var directly to update this account.");
+			}
+			process.exit(1);
+		}
+
+		// 3. Check if port is available before starting
+		const portAvailable = await checkPortAvailable(1455);
+		if (!portAvailable) {
+			throw new Error(`Port 1455 is in use. Close other ${PRIMARY_CMD} instances and retry.`);
+		}
+
+		// 4. Generate PKCE code verifier and challenge
+		const { verifier, challenge } = generatePKCE();
+
+		// 5. Generate random state for CSRF protection
+		const state = generateState();
+
+		// 6. Build authorization URL
+		const authUrl = buildAuthUrl(challenge, state);
+
+		// 7. Print starting message
+		console.log(`Re-authenticating account "${label}"...`);
+
+		// 8. Start callback server (in background)
+		const callbackPromise = startCallbackServer(state);
+
+		// 9. Open browser or print URL
+		openBrowser(authUrl, { noBrowser: flags.noBrowser });
+
+		// 10. Wait for callback with auth code
+		console.log("Waiting for browser authentication...");
+		const { code, state: returnedState } = await callbackPromise;
+
+		// 11. Verify state matches
+		if (returnedState !== state) {
+			throw new Error("State mismatch. Possible CSRF attack.");
+		}
+
+		// 12. Exchange code for tokens
+		console.log("Exchanging code for tokens...");
+		const tokens = await exchangeCodeForTokens(code, verifier);
+
+		// 13. Update the account entry in the source file
+		const container = readMultiAccountContainer(source);
+		if (container.rootType === "invalid") {
+			throw new Error(`Failed to parse ${source}`);
+		}
+
+		const updatedAccounts = container.accounts.map(entry => {
+			if (!entry || typeof entry !== "object" || entry.label !== label) {
+				return entry;
+			}
+			// Preserve any extra fields from the existing entry
+			return {
+				...entry,
+				accountId: tokens.accountId,
+				access: tokens.accessToken,
+				refresh: tokens.refreshToken,
+				idToken: tokens.idToken,
+				expires: tokens.expires,
+			};
+		});
+
+		writeMultiAccountContainer(source, container, updatedAccounts, {}, { mode: 0o600 });
+
+		// 14. Update CLI auth files if this account is active
+		const activeInfo = getCodexActiveLabelInfo();
+		if (activeInfo.activeLabel === label) {
+			// This is the active account - sync to CLI auth files
+			const updatedAccount = {
+				label,
+				accountId: tokens.accountId,
+				access: tokens.accessToken,
+				refresh: tokens.refreshToken,
+				idToken: tokens.idToken,
+				expires: tokens.expires,
+			};
+
+			// Update Codex CLI auth.json
+			const codexAuthPath = getCodexCliAuthPath();
+			let existingAuth = {};
+			if (existsSync(codexAuthPath)) {
+				try {
+					const raw = readFileSync(codexAuthPath, "utf-8");
+					existingAuth = JSON.parse(raw);
+				} catch {
+					existingAuth = {};
+				}
+			}
+
+			const codexTokens = {
+				access_token: tokens.accessToken,
+				refresh_token: tokens.refreshToken,
+				account_id: tokens.accountId,
+				expires_at: Math.floor(tokens.expires / 1000),
+			};
+			if (tokens.idToken) {
+				codexTokens.id_token = tokens.idToken;
+			}
+
+			const newAuth = {
+				...(existingAuth.OPENAI_API_KEY !== undefined ? { OPENAI_API_KEY: existingAuth.OPENAI_API_KEY } : {}),
+				tokens: codexTokens,
+				last_refresh: new Date().toISOString(),
+				codex_quota_label: label,
+			};
+
+			const codexDir = dirname(codexAuthPath);
+			if (!existsSync(codexDir)) {
+				mkdirSync(codexDir, { recursive: true });
+			}
+			writeFileAtomic(codexAuthPath, JSON.stringify(newAuth, null, 2) + "\n", { mode: 0o600 });
+
+			// Update OpenCode and pi auth files
+			updateOpencodeAuth(updatedAccount);
+			updatePiAuth(updatedAccount);
+		}
+
+		// 15. Print success message
+		if (flags.json) {
+			console.log(JSON.stringify({
+				success: true,
+				label,
+				email: tokens.email,
+				accountId: tokens.accountId,
+				source,
+			}, null, 2));
+		} else {
+			const emailDisplay = tokens.email ? ` <${tokens.email}>` : "";
+			const lines = [
+				colorize(`Re-authenticated account ${label}${emailDisplay}`, GREEN),
+				"",
+				`Updated: ${shortenPath(source)}`,
+			];
+			if (activeInfo.activeLabel === label) {
+				lines.push("");
+				lines.push("CLI auth files also updated (active account)");
+			}
+			const boxLines = drawBox(lines);
+			console.log(boxLines.join("\n"));
+		}
+	} catch (error) {
+		if (flags.json) {
+			console.log(JSON.stringify({
+				success: false,
+				error: error.message,
+			}, null, 2));
+		} else {
+			console.error(colorize(`Error: ${error.message}`, RED));
+		}
 		process.exit(1);
 	}
 }
@@ -6819,6 +7106,149 @@ async function handleClaudeAdd(args, flags) {
 }
 
 /**
+ * Handle Claude reauth subcommand - re-authenticate an existing Claude account via OAuth browser flow
+ * This updates the existing account's tokens without changing the label
+ * @param {string[]} args - Non-flag arguments (label is required)
+ * @param {{ json: boolean, noBrowser: boolean }} flags - Parsed flags
+ */
+async function handleClaudeReauth(args, flags) {
+	const label = args[0];
+	if (!label) {
+		if (flags.json) {
+			console.log(JSON.stringify({ success: false, error: "Missing required label argument" }, null, 2));
+		} else {
+			console.error(colorize(`Usage: ${PRIMARY_CMD} claude reauth <label>`, RED));
+			console.error("Re-authenticates an existing Claude account via OAuth browser flow.");
+		}
+		process.exit(1);
+	}
+
+	try {
+		// 1. Find existing account by label
+		const existingAccount = findClaudeAccountByLabel(label);
+		if (!existingAccount) {
+			const availableLabels = getClaudeLabels();
+			if (flags.json) {
+				console.log(JSON.stringify({
+					success: false,
+					error: `Claude account "${label}" not found`,
+					availableLabels,
+				}, null, 2));
+			} else if (availableLabels.length === 0) {
+				console.error(colorize(`Claude account "${label}" not found. No accounts configured.`, RED));
+				console.error(`Run '${PRIMARY_CMD} claude add' to add an account.`);
+			} else {
+				console.error(colorize(`Claude account "${label}" not found.`, RED));
+				console.error(`Available: ${availableLabels.join(", ")}`);
+			}
+			process.exit(1);
+		}
+
+		const source = existingAccount.source;
+
+		// 2. Check if account can be re-authenticated (must be in a multi-account file)
+		if (source === "env") {
+			if (flags.json) {
+				console.log(JSON.stringify({
+					success: false,
+					error: "Cannot re-authenticate account from CLAUDE_ACCOUNTS env var. Modify the env var directly.",
+				}, null, 2));
+			} else {
+				console.error(colorize("Cannot re-authenticate account from CLAUDE_ACCOUNTS env var.", RED));
+				console.error("Modify the env var directly to update this account.");
+			}
+			process.exit(1);
+		}
+
+		if (!CLAUDE_MULTI_ACCOUNT_PATHS.includes(source)) {
+			if (flags.json) {
+				console.log(JSON.stringify({
+					success: false,
+					error: `Cannot re-authenticate account from ${source}. Use the owning tool to re-authenticate.`,
+				}, null, 2));
+			} else {
+				console.error(colorize(`Cannot re-authenticate account from ${shortenPath(source)}.`, RED));
+				console.error("Use the owning tool to re-authenticate this account.");
+			}
+			process.exit(1);
+		}
+
+		// 3. Run OAuth flow
+		console.log(`Re-authenticating Claude account "${label}"...`);
+		const tokens = await handleClaudeOAuthFlow({ noBrowser: flags.noBrowser });
+
+		// 4. Update the account entry in the source file
+		const container = readMultiAccountContainer(source);
+		if (container.rootType === "invalid") {
+			throw new Error(`Failed to parse ${source}`);
+		}
+
+		const updatedAccounts = container.accounts.map(entry => {
+			if (!entry || typeof entry !== "object" || entry.label !== label) {
+				return entry;
+			}
+			// Preserve any extra fields from the existing entry
+			return {
+				...entry,
+				oauthToken: tokens.accessToken,
+				oauthRefreshToken: tokens.refreshToken,
+				oauthExpiresAt: tokens.expiresAt,
+				oauthScopes: tokens.scopes,
+			};
+		});
+
+		writeMultiAccountContainer(source, container, updatedAccounts, {}, { mode: 0o600 });
+
+		// 5. Update CLI auth files if this account is active
+		const activeInfo = getClaudeActiveLabelInfo();
+		if (activeInfo.activeLabel === label) {
+			// This is the active account - sync to CLI auth files
+			const updatedAccount = {
+				oauthToken: tokens.accessToken,
+				oauthRefreshToken: tokens.refreshToken,
+				oauthExpiresAt: tokens.expiresAt,
+				oauthScopes: tokens.scopes,
+			};
+
+			updateClaudeCredentials(updatedAccount);
+			updateOpencodeClaudeAuth(updatedAccount);
+			updatePiClaudeAuth(updatedAccount);
+		}
+
+		// 6. Print success message
+		if (flags.json) {
+			console.log(JSON.stringify({
+				success: true,
+				label,
+				source,
+			}, null, 2));
+		} else {
+			const lines = [
+				colorize(`Re-authenticated Claude account ${label}`, GREEN),
+				"",
+				`Updated: ${shortenPath(source)}`,
+			];
+			if (activeInfo.activeLabel === label) {
+				lines.push("");
+				lines.push("CLI auth files also updated (active account)");
+			}
+			const boxLines = drawBox(lines);
+			console.log(boxLines.join("\n"));
+		}
+	} catch (error) {
+		if (flags.json) {
+			console.log(JSON.stringify({
+				success: false,
+				error: error.message,
+			}, null, 2));
+		} else {
+			console.error(colorize(`Error: ${error.message}`, RED));
+		}
+		process.exit(1);
+	}
+}
+
+/**
  * Handle Codex subcommand entrypoint
  * @param {string[]} args - Codex subcommand args
  * @param {{ json: boolean, noBrowser: boolean, noColor: boolean }} flags - Parsed flags
@@ -6838,6 +7268,9 @@ async function handleCodex(args, flags) {
 			break;
 		case "add":
 			await handleAdd(subArgs, flags);
+			break;
+		case "reauth":
+			await handleCodexReauth(subArgs, flags);
 			break;
 		case "switch":
 			await handleSwitch(subArgs, flags);
@@ -6880,6 +7313,9 @@ async function handleClaude(args, flags) {
 			break;
 		case "add":
 			await handleClaudeAdd(subArgs, flags);
+			break;
+		case "reauth":
+			await handleClaudeReauth(subArgs, flags);
 			break;
 		case "list":
 			await handleClaudeList(flags);
@@ -7208,7 +7644,7 @@ async function main() {
 		return;
 	}
 	
-	const legacyCommands = ["add", "switch", "list", "remove", "quota", "sync"];
+	const legacyCommands = ["add", "reauth", "switch", "list", "remove", "quota", "sync"];
 	if (!namespace && firstArg && legacyCommands.includes(firstArg)) {
 		console.error(colorize(`Error: '${firstArg}' now requires a namespace.`, RED));
 		console.error(`Use '${PRIMARY_CMD} codex ${firstArg}' or '${PRIMARY_CMD} claude ${firstArg}'.`);
@@ -7225,6 +7661,9 @@ async function main() {
 			switch (subcommand) {
 				case "add":
 					printHelpAdd();
+					break;
+				case "reauth":
+					printHelpCodexReauth();
 					break;
 				case "switch":
 					printHelpSwitch();
@@ -7250,6 +7689,9 @@ async function main() {
 		switch (subcommand) {
 			case "add":
 				printHelpClaudeAdd();
+				break;
+			case "reauth":
+				printHelpClaudeReauth();
 				break;
 			case "switch":
 				printHelpClaudeSwitch();
@@ -7388,8 +7830,10 @@ export {
 	// Subcommand handlers (for testing)
 	handleSwitch,
 	handleCodexSync,
+	handleCodexReauth,
 	handleRemove,
 	handleClaudeAdd,
+	handleClaudeReauth,
 	handleClaudeSwitch,
 	handleClaudeSync,
 	handleClaudeRemove,
@@ -7409,8 +7853,10 @@ export {
 	// Help functions (for testing)
 	printHelp,
 	printHelpAdd,
+	printHelpCodexReauth,
 	printHelpClaude,
 	printHelpClaudeAdd,
+	printHelpClaudeReauth,
 	printHelpClaudeSync,
 	printHelpSwitch,
 	printHelpCodexSync,
