@@ -5585,6 +5585,165 @@ function detectClaudeDivergence() {
 	};
 }
 
+function isLikelyValidClaudeOauthTokens(tokens) {
+	if (!tokens?.access) return false;
+	if (typeof tokens.expires === "number" && tokens.expires <= Date.now()) return false;
+	return true;
+}
+
+function isClaudeOauthTokenEquivalent(storeTokens, account) {
+	if (!storeTokens || !account) return false;
+	const storeRefresh = storeTokens.refresh ?? null;
+	const storeAccess = storeTokens.access ?? null;
+	const accountRefresh = account.oauthRefreshToken ?? null;
+	const accountAccess = account.oauthToken ?? null;
+	if (storeRefresh && accountRefresh) return storeRefresh === accountRefresh;
+	if (storeAccess && accountAccess) return storeAccess === accountAccess;
+	return false;
+}
+
+/**
+ * Find Claude OAuth tokens in OpenCode/pi that are not present in managed accounts.
+ * @param {Array<ReturnType<typeof normalizeClaudeAccount>>} managedAccounts
+ * @returns {Array<{ name: string, path: string, tokens: ReturnType<typeof normalizeClaudeOauthEntryTokens> }>}
+ */
+function findUntrackedClaudeOauthStores(managedAccounts) {
+	const trackedAccounts = Array.isArray(managedAccounts) ? managedAccounts : [];
+	const stores = [
+		readOpencodeClaudeOauthStore(),
+		readPiClaudeOauthStore(),
+	];
+	const untracked = [];
+
+	for (const store of stores) {
+		if (!store.exists || !store.tokens) continue;
+		if (!isLikelyValidClaudeOauthTokens(store.tokens)) continue;
+		const matches = trackedAccounts.some(account => isClaudeOauthTokenEquivalent(store.tokens, account));
+		if (!matches) {
+			untracked.push({
+				name: store.name,
+				path: store.path,
+				tokens: store.tokens,
+			});
+		}
+	}
+
+	return untracked;
+}
+
+async function maybeImportClaudeOauthStores(options = {}) {
+	const json = Boolean(options.json);
+	const result = {
+		updated: false,
+		warnings: [],
+	};
+	if (json) return result;
+	if (!process.stdin.isTTY || !process.stdout.isTTY) return result;
+
+	const { path: targetPath, container } = readClaudeActiveStoreContainer();
+	if (container.rootType === "invalid") {
+		result.warnings.push(`Invalid Claude accounts file at ${targetPath}`);
+		return result;
+	}
+	if (container.rootType === "missing") {
+		container.accounts = [];
+	}
+
+	let managedAccounts = container.accounts
+		.map(entry => normalizeClaudeAccount(entry, targetPath))
+		.filter(account => account && isValidClaudeAccount(account));
+	const existingLabels = new Set(managedAccounts.map(account => account.label));
+	const untrackedStores = findUntrackedClaudeOauthStores(managedAccounts);
+
+	if (!untrackedStores.length) return result;
+
+	for (const store of untrackedStores) {
+		console.error(
+			`Detected Claude OAuth token in ${store.name} (${shortenPath(store.path)}) `
+				+ `not saved in ${shortenPath(targetPath)}.`
+		);
+
+		if (!managedAccounts.length) {
+			console.error("No managed Claude accounts found to merge into.");
+		}
+		console.error("Choose how to record it:");
+		console.error("  [1] Add as new account");
+		console.error("  [2] Merge into existing account");
+		console.error("  [3] Skip\n");
+		const choice = (await promptInput("Enter choice (1, 2, or 3): ")).trim();
+
+		if (choice === "2" && managedAccounts.length) {
+			console.error(`Existing labels: ${managedAccounts.map(a => a.label).join(", ")}`);
+			const mergeLabel = (await promptInput("Merge into label: ")).trim();
+			if (!mergeLabel || !existingLabels.has(mergeLabel)) {
+				console.error(colorize(`Skipping: label "${mergeLabel}" not found.`, YELLOW));
+				continue;
+			}
+			const mapped = mapContainerAccounts(container, (entry) => {
+				if (!entry || typeof entry !== "object") return entry;
+				if (entry.label !== mergeLabel) return entry;
+				return updateClaudeOauthEntry({ ...entry }, {
+					accessToken: store.tokens.access,
+					refreshToken: store.tokens.refresh,
+					expiresAt: store.tokens.expires,
+					scopes: store.tokens.scopes,
+				});
+			});
+			if (mapped.updated) {
+				container.accounts = mapped.accounts;
+				result.updated = true;
+				managedAccounts = container.accounts
+					.map(entry => normalizeClaudeAccount(entry, targetPath))
+					.filter(account => account && isValidClaudeAccount(account));
+				console.error(colorize(`Merged OAuth token into "${mergeLabel}".`, GREEN));
+			} else {
+				console.error(colorize(`No changes applied to "${mergeLabel}".`, YELLOW));
+			}
+			continue;
+		}
+
+		if (choice === "1" || (choice === "2" && !managedAccounts.length)) {
+			const label = (await promptInput("New label: ")).trim();
+			if (!label) {
+				console.error(colorize("Skipping: label is required.", YELLOW));
+				continue;
+			}
+			if (!/^[a-zA-Z0-9_-]+$/.test(label)) {
+				console.error(colorize(`Skipping: invalid label "${label}".`, YELLOW));
+				continue;
+			}
+			if (existingLabels.has(label)) {
+				console.error(colorize(`Skipping: label "${label}" already exists.`, YELLOW));
+				continue;
+			}
+			const newAccount = {
+				label,
+				sessionKey: null,
+				oauthToken: store.tokens.access,
+				oauthRefreshToken: store.tokens.refresh ?? null,
+				oauthExpiresAt: store.tokens.expires ?? null,
+				oauthScopes: store.tokens.scopes ?? null,
+				cfClearance: null,
+				orgId: null,
+			};
+			container.accounts.push(newAccount);
+			managedAccounts.push(normalizeClaudeAccount(newAccount, targetPath));
+			existingLabels.add(label);
+			result.updated = true;
+			console.error(colorize(`Added Claude account "${label}".`, GREEN));
+			continue;
+		}
+
+		console.error("Skipping import.");
+	}
+
+	if (result.updated) {
+		writeMultiAccountContainer(targetPath, container, container.accounts, {}, { mode: 0o600 });
+	}
+
+	return result;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Reverse-sync helpers (pull fresher tokens from CLI stores)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6058,6 +6217,12 @@ async function handleList(flags) {
  * @param {{ json: boolean }} flags - Parsed flags
  */
 async function handleClaudeList(flags) {
+	const importResult = await maybeImportClaudeOauthStores({ json: flags.json });
+	if (importResult.warnings.length && !flags.json) {
+		for (const warning of importResult.warnings) {
+			console.error(colorize(`Warning: ${warning}`, YELLOW));
+		}
+	}
 	const divergence = detectClaudeDivergence();
 	const activeLabel = divergence.activeLabel ?? null;
 	const claudeAccounts = loadClaudeAccounts();
@@ -7425,6 +7590,12 @@ async function handleQuota(args, flags, scope = "all") {
 
 	let claudeResults = null;
 	if (showClaude) {
+		const importResult = await maybeImportClaudeOauthStores({ json: flags.json });
+		if (importResult.warnings.length && !flags.json) {
+			for (const warning of importResult.warnings) {
+				console.error(colorize(`Warning: ${warning}`, YELLOW));
+			}
+		}
 		const wantsClaudeLabel = scope === "claude" && Boolean(labelFilter);
 		const oauthAccounts = loadAllClaudeOAuthAccounts();
 		const filteredOauthAccounts = wantsClaudeLabel
