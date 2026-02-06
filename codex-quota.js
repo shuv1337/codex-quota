@@ -554,15 +554,16 @@ function getCodexActiveLabelInfo() {
 /**
  * Load ALL accounts from ALL sources without deduplication by email.
  * This is the source for label resolution and active label workflows.
+ * @param {{ local?: boolean }} [options] - When local=true, skip harness auth files (Codex CLI, OpenCode, pi)
  * @returns {Array<{label: string, accountId: string, access: string, refresh: string, expires?: number, source: string}>}
  */
-function loadAllAccountsNoDedup() {
+function loadAllAccountsNoDedup(options = {}) {
 	const all = [];
 	all.push(...loadAccountsFromEnv());
 	for (const path of MULTI_ACCOUNT_PATHS) {
 		all.push(...loadAccountsFromFile(path));
 	}
-	if (all.length === 0) {
+	if (all.length === 0 && !options.local) {
 		all.push(...loadAccountFromCodexCli());
 	}
 	return all;
@@ -573,10 +574,11 @@ function loadAllAccountsNoDedup() {
  * Each account includes a `source` property indicating its origin
  * Deduplicates by email to prevent showing same user twice
  * @param {string | null} [preferredLabel] - Optional label to preserve during dedup
+ * @param {{ local?: boolean }} [options] - When local=true, skip harness auth files
  * @returns {Array<{label: string, accountId: string, access: string, refresh: string, expires?: number, source: string}>}
  */
-function loadAllAccounts(preferredLabel = null) {
-	const all = loadAllAccountsNoDedup();
+function loadAllAccounts(preferredLabel = null, options = {}) {
+	const all = loadAllAccountsNoDedup(options);
 	return deduplicateAccountsByEmail(all, { preferredLabel });
 }
 
@@ -1819,12 +1821,13 @@ function deduplicateClaudeResultsByUsage(results) {
  * Sources (in priority order):
  *   1. CLAUDE_OAUTH_ACCOUNTS env var
  *   2. ~/.claude-accounts.json (accounts with oauthToken field)
- *   3. ~/.claude/.credentials.json (Claude Code)
- *   4. ~/.local/share/opencode/auth.json (OpenCode)
+ *   3. ~/.claude/.credentials.json (Claude Code)       [skipped when local=true]
+ *   4. ~/.local/share/opencode/auth.json (OpenCode)    [skipped when local=true]
  * Deduplicates by accessToken to prevent showing same account twice
+ * @param {{ local?: boolean }} [options] - When local=true, skip harness auth files
  * @returns {Array<{ label: string, accessToken: string, refreshToken?: string, expiresAt?: number, subscriptionType?: string, rateLimitTier?: string, source: string }>}
  */
-function loadAllClaudeOAuthAccounts() {
+function loadAllClaudeOAuthAccounts(options = {}) {
 	const all = [];
 	const seenLabels = new Set();
 
@@ -1855,19 +1858,23 @@ function loadAllClaudeOAuthAccounts() {
 		}
 	}
 
-	// 3. Claude Code credentials
-	for (const account of loadClaudeOAuthFromClaudeCode()) {
-		if (!seenLabels.has(account.label)) {
-			seenLabels.add(account.label);
-			all.push(account);
+	// 3. Claude Code credentials (skip in local mode)
+	if (!options.local) {
+		for (const account of loadClaudeOAuthFromClaudeCode()) {
+			if (!seenLabels.has(account.label)) {
+				seenLabels.add(account.label);
+				all.push(account);
+			}
 		}
 	}
 
-	// 4. OpenCode credentials
-	for (const account of loadClaudeOAuthFromOpenCode()) {
-		if (!seenLabels.has(account.label)) {
-			seenLabels.add(account.label);
-			all.push(account);
+	// 4. OpenCode credentials (skip in local mode)
+	if (!options.local) {
+		for (const account of loadClaudeOAuthFromOpenCode()) {
+			if (!seenLabels.has(account.label)) {
+				seenLabels.add(account.label);
+				all.push(account);
+			}
 		}
 	}
 
@@ -3016,6 +3023,7 @@ Namespaces:
 
 Options:
   --json            Output in JSON format
+  --local           Use only stored account files; skip harness token checks
   --dry-run         Preview sync without writing files
   --no-browser      Print auth URL instead of opening browser
   --no-color        Disable colored output
@@ -3282,12 +3290,14 @@ Usage:
 
 Options:
   --json            Output in JSON format
+  --local           Skip harness token checks and divergence warnings
   --help, -h        Show this help
 
 Description:
   Lists Claude credentials stored in CLAUDE_ACCOUNTS or ~/.claude-accounts.json.
   The activeLabel account is marked with '*'.
   OAuth-based accounts are checked for divergence in Claude CLI stores.
+  Use --local to suppress harness checks and only use stored account files.
 
 Examples:
   ${PRIMARY_CMD} claude list
@@ -3329,6 +3339,7 @@ Arguments:
 
 Options:
   --json            Output in JSON format
+  --local           Skip harness token checks and divergence warnings
   --help, -h        Show this help
 
 Description:
@@ -3336,6 +3347,7 @@ Description:
   available. Uses OAuth credentials when possible and falls back to legacy
   session credentials.
   OAuth-based accounts are checked for divergence in Claude CLI stores.
+  Use --local to suppress harness checks and only use stored account files.
 
 Examples:
   ${PRIMARY_CMD} claude quota
@@ -3496,6 +3508,7 @@ Usage:
 
 Options:
 	  --json            Output in JSON format
+	  --local           Skip harness token checks and divergence warnings
 	  --help, -h        Show this help
 
 Description:
@@ -3508,6 +3521,7 @@ Description:
   Accounts are deduplicated by email for display and prefer the
   activeLabel account when duplicates exist.
   If CLI auth diverges from activeLabel, a warning is shown with a sync hint.
+  Use --local to suppress harness checks and only use stored account files.
 
 Output columns:
   * = active        Active account from activeLabel
@@ -3570,6 +3584,7 @@ Arguments:
 
 Options:
 	  --json            Output in JSON format
+	  --local           Skip harness token checks and divergence warnings
 	  --help, -h        Show this help
 
 Description:
@@ -3585,6 +3600,7 @@ Description:
 
   Tokens are automatically refreshed if expired.
   If CLI auth diverges from activeLabel, a warning is shown with a sync hint.
+  Use --local to suppress these checks and only use stored account files.
 
 Examples:
 	  ${PRIMARY_CMD} codex quota                 Check all Codex accounts
@@ -6065,12 +6081,12 @@ function shortenPath(filePath) {
 
 /**
  * Handle list subcommand - list all accounts from all sources
- * @param {{ json: boolean }} flags - Parsed flags
+ * @param {{ json: boolean, local?: boolean }} flags - Parsed flags
  */
 async function handleList(flags) {
-	const codexDivergence = detectCodexDivergence({ allowMigration: false });
-	const activeLabel = codexDivergence.activeLabel ?? null;
-	const accounts = loadAllAccounts(activeLabel);
+	const codexDivergence = flags.local ? null : detectCodexDivergence({ allowMigration: false });
+	const activeLabel = codexDivergence?.activeLabel ?? null;
+	const accounts = loadAllAccounts(activeLabel, { local: flags.local });
 	
 	// Handle zero accounts case
 	if (!accounts.length) {
@@ -6089,10 +6105,10 @@ async function handleList(flags) {
 		return;
 	}
 	
-	const activeAccountId = codexDivergence.activeAccount?.accountId ?? null;
-	const cliAccountId = codexDivergence.cliAccountId ?? null;
-	const cliLabel = codexDivergence.cliLabel ?? null;
-	const divergenceDetected = codexDivergence.diverged;
+	const activeAccountId = codexDivergence?.activeAccount?.accountId ?? null;
+	const cliAccountId = codexDivergence?.cliAccountId ?? null;
+	const cliLabel = codexDivergence?.cliLabel ?? null;
+	const divergenceDetected = codexDivergence?.diverged ?? false;
 	const nativeAccountId = cliAccountId && (!activeAccountId || cliAccountId !== activeAccountId)
 		? cliAccountId
 		: null;
@@ -6126,11 +6142,12 @@ async function handleList(flags) {
 			activeInfo: {
 				activeLabel,
 				activeAccountId,
-				activeStorePath: codexDivergence.activeStorePath,
+				activeStorePath: codexDivergence?.activeStorePath ?? null,
 				cliAccountId,
 				cliLabel,
 				divergence: divergenceDetected,
-				migrated: codexDivergence.migrated,
+				migrated: codexDivergence?.migrated ?? false,
+				local: flags.local ?? false,
 			},
 		};
 		console.log(JSON.stringify(output, null, 2));
@@ -6214,17 +6231,19 @@ async function handleList(flags) {
 
 /**
  * Handle Claude list subcommand - list Claude credentials
- * @param {{ json: boolean }} flags - Parsed flags
+ * @param {{ json: boolean, local?: boolean }} flags - Parsed flags
  */
 async function handleClaudeList(flags) {
-	const importResult = await maybeImportClaudeOauthStores({ json: flags.json });
-	if (importResult.warnings.length && !flags.json) {
-		for (const warning of importResult.warnings) {
-			console.error(colorize(`Warning: ${warning}`, YELLOW));
+	if (!flags.local) {
+		const importResult = await maybeImportClaudeOauthStores({ json: flags.json });
+		if (importResult.warnings.length && !flags.json) {
+			for (const warning of importResult.warnings) {
+				console.error(colorize(`Warning: ${warning}`, YELLOW));
+			}
 		}
 	}
-	const divergence = detectClaudeDivergence();
-	const activeLabel = divergence.activeLabel ?? null;
+	const divergence = flags.local ? null : detectClaudeDivergence();
+	const activeLabel = divergence?.activeLabel ?? null;
 	const claudeAccounts = loadClaudeAccounts();
 
 	if (!claudeAccounts.length) {
@@ -6254,17 +6273,18 @@ async function handleClaudeList(flags) {
 			})),
 			activeInfo: {
 				activeLabel,
-				activeStorePath: divergence.activeStorePath,
-				divergence: divergence.diverged,
-				skipped: divergence.skipped,
-				skipReason: divergence.skipReason,
+				activeStorePath: divergence?.activeStorePath ?? null,
+				divergence: divergence?.diverged ?? false,
+				skipped: divergence?.skipped ?? false,
+				skipReason: divergence?.skipReason ?? null,
+				local: flags.local ?? false,
 			},
 		};
 		console.log(JSON.stringify(output, null, 2));
 		return;
 	}
 
-	if (divergence.diverged) {
+	if (divergence?.diverged) {
 		const divergedStores = divergence.stores
 			.filter(store => store.considered && store.matches === false)
 			.map(store => store.name);
@@ -6274,7 +6294,7 @@ async function handleClaudeList(flags) {
 		console.error("");
 		console.error(`Run '${PRIMARY_CMD} claude sync' to push active account to CLI.`);
 		console.error("");
-	} else if (divergence.skipped && divergence.skipReason === "active-account-not-oauth" && activeLabel) {
+	} else if (divergence?.skipped && divergence.skipReason === "active-account-not-oauth" && activeLabel) {
 		console.error("Note: Active Claude account has no OAuth tokens; skipping divergence check.");
 		console.error("");
 	}
@@ -7511,11 +7531,12 @@ async function handleClaude(args, flags) {
  * Handle quota subcommand (default behavior)
  * By default, shows both Codex and Claude accounts
  * @param {string[]} args - Non-flag arguments (e.g., label filter)
- * @param {{ json: boolean }} flags - Parsed flags
+ * @param {{ json: boolean, local?: boolean }} flags - Parsed flags
  * @param {"all" | "codex" | "claude"} scope - Which accounts to show
  */
 async function handleQuota(args, flags, scope = "all") {
 	const labelFilter = args[0];
+	const localMode = Boolean(flags.local);
 	
 	// Determine which account types to show:
 	// - scope "all": show both (default)
@@ -7524,11 +7545,11 @@ async function handleQuota(args, flags, scope = "all") {
 	const showCodex = scope === "all" || scope === "codex";
 	const showClaude = scope === "all" || scope === "claude";
 	
-	const codexDivergence = showCodex ? detectCodexDivergence({ allowMigration: false }) : null;
+	const codexDivergence = showCodex && !localMode ? detectCodexDivergence({ allowMigration: false }) : null;
 	const codexActiveLabel = codexDivergence?.activeLabel ?? null;
-	const allAccounts = showCodex ? loadAllAccounts(codexActiveLabel) : [];
+	const allAccounts = showCodex ? loadAllAccounts(codexActiveLabel, { local: localMode }) : [];
 	const hasOpenAiAccounts = allAccounts.length > 0;
-	const claudeDivergence = showClaude ? detectClaudeDivergence() : null;
+	const claudeDivergence = showClaude && !localMode ? detectClaudeDivergence() : null;
 
 	// Check if we have any accounts to show
 	if (!hasOpenAiAccounts && !showClaude) {
@@ -7590,14 +7611,16 @@ async function handleQuota(args, flags, scope = "all") {
 
 	let claudeResults = null;
 	if (showClaude) {
-		const importResult = await maybeImportClaudeOauthStores({ json: flags.json });
-		if (importResult.warnings.length && !flags.json) {
-			for (const warning of importResult.warnings) {
-				console.error(colorize(`Warning: ${warning}`, YELLOW));
+		if (!localMode) {
+			const importResult = await maybeImportClaudeOauthStores({ json: flags.json });
+			if (importResult.warnings.length && !flags.json) {
+				for (const warning of importResult.warnings) {
+					console.error(colorize(`Warning: ${warning}`, YELLOW));
+				}
 			}
 		}
 		const wantsClaudeLabel = scope === "claude" && Boolean(labelFilter);
-		const oauthAccounts = loadAllClaudeOAuthAccounts();
+		const oauthAccounts = loadAllClaudeOAuthAccounts({ local: localMode });
 		const filteredOauthAccounts = wantsClaudeLabel
 			? oauthAccounts.filter(account => account.label === labelFilter)
 			: oauthAccounts;
@@ -7793,6 +7816,7 @@ async function main() {
 		oauth: args.includes("--oauth"),
 		manual: args.includes("--manual"),
 		dryRun: args.includes("--dry-run"),
+		local: args.includes("--local"),
 	};
 	
 	// Set global noColorFlag for supportsColor() function

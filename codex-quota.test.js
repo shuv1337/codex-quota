@@ -4196,3 +4196,122 @@ describe("parseClaudeCodeState", () => {
 		expect(result.state).toBeNull();
 	});
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// --local flag tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("--local flag", () => {
+	const testDir = join(tmpdir(), "codex-quota-local-flag-" + Date.now());
+	const testCodexAuthFile = join(testDir, "codex-auth.json");
+	let originalCodexAuthPath;
+	let originalCodexAccounts;
+	let originalOpencodeAccounts;
+	let originalEnv;
+
+	beforeEach(() => {
+		mkdirSync(testDir, { recursive: true });
+		originalCodexAuthPath = process.env.CODEX_AUTH_PATH;
+		originalEnv = process.env.CODEX_ACCOUNTS;
+		process.env.CODEX_AUTH_PATH = testCodexAuthFile;
+		// Backup and remove real multi-account files so codex-cli fallback triggers
+		originalCodexAccounts = backupFileContents(MULTI_ACCOUNT_PATHS[0]);
+		originalOpencodeAccounts = backupFileContents(MULTI_ACCOUNT_PATHS[1]);
+		rmSync(MULTI_ACCOUNT_PATHS[0], { force: true });
+		rmSync(MULTI_ACCOUNT_PATHS[1], { force: true });
+	});
+
+	afterEach(() => {
+		rmSync(testDir, { recursive: true, force: true });
+		if (originalCodexAuthPath === undefined) {
+			delete process.env.CODEX_AUTH_PATH;
+		} else {
+			process.env.CODEX_AUTH_PATH = originalCodexAuthPath;
+		}
+		if (originalEnv === undefined) {
+			delete process.env.CODEX_ACCOUNTS;
+		} else {
+			process.env.CODEX_ACCOUNTS = originalEnv;
+		}
+		restoreFileContents(MULTI_ACCOUNT_PATHS[0], originalCodexAccounts);
+		restoreFileContents(MULTI_ACCOUNT_PATHS[1], originalOpencodeAccounts);
+	});
+
+	test("loadAllAccountsNoDedup skips codex-cli auth.json when local=true", () => {
+		// Set up codex-cli auth.json with a single account
+		const mockToken = createMockAccessToken("acc_cli_only", "cli@example.com");
+		const codexAuthPayload = {
+			tokens: {
+				access_token: mockToken,
+				refresh_token: "refresh-cli",
+				account_id: "acc_cli_only",
+				expires_at: Math.floor((Date.now() + 3600000) / 1000),
+			},
+		};
+		writeFileSync(testCodexAuthFile, JSON.stringify(codexAuthPayload));
+
+		// No env or multi-account file accounts
+		delete process.env.CODEX_ACCOUNTS;
+
+		// Without local flag: should find codex-cli account as fallback
+		const withoutLocal = loadAllAccountsNoDedup();
+		const cliAccount = withoutLocal.find(a => a.label === "codex-cli");
+		expect(cliAccount).toBeDefined();
+
+		// With local flag: should not load codex-cli fallback
+		const withLocal = loadAllAccountsNoDedup({ local: true });
+		const cliAccountLocal = withLocal.find(a => a.label === "codex-cli");
+		expect(cliAccountLocal).toBeUndefined();
+	});
+
+	test("loadAllAccounts respects local option", () => {
+		const mockToken = createMockAccessToken("acc_local_test", "local@example.com");
+		const codexAuthPayload = {
+			tokens: {
+				access_token: mockToken,
+				refresh_token: "refresh-local",
+				account_id: "acc_local_test",
+				expires_at: Math.floor((Date.now() + 3600000) / 1000),
+			},
+		};
+		writeFileSync(testCodexAuthFile, JSON.stringify(codexAuthPayload));
+		delete process.env.CODEX_ACCOUNTS;
+
+		// Without local: codex-cli should appear
+		const withoutLocal = loadAllAccounts(null);
+		expect(withoutLocal.some(a => a.label === "codex-cli")).toBe(true);
+
+		// With local: codex-cli should NOT appear
+		const withLocal = loadAllAccounts(null, { local: true });
+		expect(withLocal.some(a => a.label === "codex-cli")).toBe(false);
+	});
+
+	test("loadAllAccountsNoDedup still loads env accounts in local mode", () => {
+		const mockAccounts = [
+			{ label: "env-local", accountId: "acc_env", access: createMockAccessToken("acc_env"), refresh: "refresh-env" },
+		];
+		process.env.CODEX_ACCOUNTS = JSON.stringify(mockAccounts);
+
+		const accounts = loadAllAccountsNoDedup({ local: true });
+		expect(accounts.some(a => a.label === "env-local")).toBe(true);
+	});
+
+	test("loadAllClaudeOAuthAccounts skips harness sources when local=true", () => {
+		// Verify that loadAllClaudeOAuthAccounts({ local: true }) does not
+		// include accounts sourced from Claude Code credentials or OpenCode auth.json
+		const localAccounts = loadAllClaudeOAuthAccounts({ local: true });
+		expect(Array.isArray(localAccounts)).toBe(true);
+
+		// Accounts from claude-code and opencode labels should not appear in local mode
+		// (unless they come from env or multi-account files)
+		const claudeCodeFromHarness = localAccounts.find(
+			a => a.label === "claude-code" && !a.source.startsWith("env")
+		);
+		const opencodeFromHarness = localAccounts.find(
+			a => a.label === "opencode" && !a.source.startsWith("env")
+		);
+		// In local mode, harness-sourced accounts should be absent
+		expect(claudeCodeFromHarness?.source?.includes(".credentials.json") ?? false).toBe(false);
+		expect(opencodeFromHarness?.source?.includes("opencode/auth.json") ?? false).toBe(false);
+	});
+});
