@@ -2750,13 +2750,17 @@ function buildAccountUsageLines(account, payload) {
 	const planType = usage?.plan_type ?? profile.planType;
 	const planDisplay = planType ? ` (${planType})` : "";
 	
-	// Header: label <email> (plan)
+	// Header: Codex (label) <email> (plan) — matches Claude format
+	const labelDisplay = account.label ? ` (${account.label})` : "";
 	const emailDisplay = profile.email ? ` <${profile.email}>` : "";
-	lines.push(`${account.label}${emailDisplay}${planDisplay}`);
+	lines.push(`Codex${labelDisplay}${emailDisplay}${planDisplay}`);
 	lines.push("");
 	
 	if (payload.error) {
 		lines.push(`Error: ${payload.error}`);
+		if (account.source) {
+			lines.push(`  Source: ${shortenPath(account.source)}`);
+		}
 		return lines;
 	}
 	
@@ -2776,6 +2780,10 @@ function buildAccountUsageLines(account, payload) {
 			const reset = weekly.resetAfterSeconds ? formatResetTime(weekly.resetAfterSeconds, "inline") : "";
 			lines.push(`Weekly limit: ${printBar(remaining)} ${Math.round(remaining)}% left ${reset}`);
 		}
+	}
+	
+	if (account.source) {
+		lines.push(`  Source: ${shortenPath(account.source)}`);
 	}
 	
 	return lines;
