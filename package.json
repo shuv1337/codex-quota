@@ -13,6 +13,7 @@
   },
   "files": [
     "codex-quota.js",
+    "lib/",
     "README.md",
     "LICENSE"
   ],

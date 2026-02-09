@@ -21,7 +21,7 @@ const ROOT = join(__dirname, "..");
 // ─────────────────────────────────────────────────────────────────────────────
 
 const EXPECTED_NAME = "codex-quota";
-const REQUIRED_FILES = ["codex-quota.js", "README.md", "LICENSE"];
+const REQUIRED_FILES = ["codex-quota.js", "lib/", "README.md", "LICENSE"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Check functions
