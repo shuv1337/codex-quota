@@ -226,6 +226,8 @@ export {
 export {
 	shortenPath,
 	formatExpiryStatus,
+	normalizePercentUsed,
+	parseClaudeUtilizationWindow,
 	drawBox,
 	printHelp,
 	printHelpAdd,

@@ -68,6 +68,8 @@ import {
 	extractAccountId,
 	getActiveAccountId,
 	formatExpiryStatus,
+	normalizePercentUsed,
+	parseClaudeUtilizationWindow,
 	shortenPath,
 	supportsColor,
 	colorize,
@@ -2402,6 +2404,27 @@ describe("formatExpiryStatus", () => {
 		const result = formatExpiryStatus(futureTime);
 		expect(result.status).toBe("valid");
 		expect(result.display).toMatch(/^\d+d \d+h$/);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Claude utilization parsing tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("normalizePercentUsed", () => {
+	test("treats integer 1 as 1% used (not 100%)", () => {
+		expect(normalizePercentUsed(1)).toBe(1);
+	});
+
+	test("converts legacy fractional values in (0, 1) to percentage points", () => {
+		expect(normalizePercentUsed(0.1)).toBe(10);
+	});
+});
+
+describe("parseClaudeUtilizationWindow", () => {
+	test("returns 99% remaining for utilization=1", () => {
+		const parsed = parseClaudeUtilizationWindow({ utilization: 1 });
+		expect(parsed.remaining).toBe(99);
 	});
 });
 
