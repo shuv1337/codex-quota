@@ -287,4 +287,4 @@ afterEach(() => {
 
 ### Test Counts
 
-As of v1.1.24: **206 tests, 563 expect() calls**. All tests must pass before any commit.
+As of v1.1.25: **206 tests, 563 expect() calls**. All tests must pass before any commit.
