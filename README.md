@@ -87,6 +87,10 @@ codex-quota codex add work           # With explicit label
 codex-quota codex add --no-browser   # Print URL (for SSH/headless)
 ```
 
+You can store multiple Codex workspaces for the same email address by using distinct labels.
+For example, if the same login has both `Plus` and `Team`, add them as separate labels such as
+`personal-plus` and `work-team`, then choose the correct workspace during the OAuth flow.
+
 ### claude add
 
 Add a Claude credential interactively.
@@ -138,6 +142,9 @@ Output shows:
 - `~` = CLI auth account when it diverges from `activeLabel`
 - Email, plan type, token expiry
 - Source file for each account
+
+Accounts are deduplicated by identity, not only by email, so the same email can appear more
+than once when it belongs to different ChatGPT account IDs (for example `Plus` and `Team`).
 
 If CLI auth diverges from the tracked `activeLabel`, `list` and `quota` print a warning and
 suggest `codex-quota codex sync` to realign.
