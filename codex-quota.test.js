@@ -1473,6 +1473,27 @@ describe("deduplicateAccountsByEmail", () => {
 		const result = deduplicateAccountsByEmail(accounts);
 		expect(result.length).toBe(2);
 	});
+
+	test("keeps same email when accountId differs across workspaces", () => {
+		const accounts = [
+			{ label: "team", accountId: "team-account", access: createMockAccessToken("team-account", "same@example.com"), source: "team-file" },
+			{ label: "plus", accountId: "plus-account", access: createMockAccessToken("plus-account", "same@example.com"), source: "plus-file" },
+		];
+		const result = deduplicateAccountsByEmail(accounts);
+		expect(result.length).toBe(2);
+		expect(result.map(account => account.label)).toEqual(["team", "plus"]);
+	});
+
+	test("preferred label only wins within the same identity", () => {
+		const accounts = [
+			{ label: "team-old", accountId: "team-account", access: createMockAccessToken("team-account", "same@example.com"), source: "file-a" },
+			{ label: "team-active", accountId: "team-account", access: createMockAccessToken("team-account", "same@example.com"), source: "file-b" },
+			{ label: "plus", accountId: "plus-account", access: createMockAccessToken("plus-account", "same@example.com"), source: "file-c" },
+		];
+		const result = deduplicateAccountsByEmail(accounts, { preferredLabel: "team-active" });
+		expect(result.length).toBe(2);
+		expect(result.map(account => account.label)).toEqual(["team-active", "plus"]);
+	});
 });
 
 describe("deduplicateClaudeOAuthAccounts", () => {
