@@ -1473,6 +1473,37 @@ describe("deduplicateAccountsByEmail", () => {
 		const result = deduplicateAccountsByEmail(accounts);
 		expect(result.length).toBe(2);
 	});
+
+	test("keeps same email with different accountId (team accounts)", () => {
+		const accounts = [
+			{ label: "team-a", accountId: "acct-111", access: createFakeJwtWithEmail("user@example.com"), source: "s1" },
+			{ label: "team-b", accountId: "acct-222", access: createFakeJwtWithEmail("user@example.com"), source: "s2" },
+		];
+		const result = deduplicateAccountsByEmail(accounts);
+		expect(result.length).toBe(2);
+		expect(result[0].label).toBe("team-a");
+		expect(result[1].label).toBe("team-b");
+	});
+
+	test("deduplicates same email with same accountId", () => {
+		const accounts = [
+			{ label: "source-a", accountId: "acct-111", access: createFakeJwtWithEmail("user@example.com"), source: "s1" },
+			{ label: "source-b", accountId: "acct-111", access: createFakeJwtWithEmail("user@example.com"), source: "s2" },
+		];
+		const result = deduplicateAccountsByEmail(accounts);
+		expect(result.length).toBe(1);
+		expect(result[0].label).toBe("source-a");
+	});
+
+	test("preferredLabel works with accountId-based dedup", () => {
+		const accounts = [
+			{ label: "old", accountId: "acct-111", access: createFakeJwtWithEmail("user@example.com"), source: "s1" },
+			{ label: "preferred", accountId: "acct-111", access: createFakeJwtWithEmail("user@example.com"), source: "s2" },
+		];
+		const result = deduplicateAccountsByEmail(accounts, { preferredLabel: "preferred" });
+		expect(result.length).toBe(1);
+		expect(result[0].label).toBe("preferred");
+	});
 });
 
 describe("deduplicateClaudeOAuthAccounts", () => {
