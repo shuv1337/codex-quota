@@ -201,6 +201,61 @@ describe("loadGrokAccountsFromPiAuth", () => {
 		expect(accounts[0].accountId).toBe("pi-user");
 		expect(accounts[0].refreshToken).toBe("refresh-pi");
 		expect(accounts[0].sources[0].kind).toBe("pi-auth");
+		expect(accounts[0].sources[0].providerKey).toBe("xai-oauth");
+	});
+
+	test("loads xai entry used by current shuvpi sessions", () => {
+		const access = makeGrokJwt({ sub: "pi-xai-user" });
+		writeFileSync(authPath, JSON.stringify({
+			xai: {
+				type: "oauth",
+				access,
+				refresh: "refresh-xai",
+				expires: Date.now() + 60_000,
+			},
+		}));
+		const accounts = loadGrokAccountsFromPiAuth(authPath);
+		expect(accounts).toHaveLength(1);
+		expect(accounts[0].accountId).toBe("pi-xai-user");
+		expect(accounts[0].refreshToken).toBe("refresh-xai");
+		expect(accounts[0].sources[0].providerKey).toBe("xai");
+	});
+
+	test("loads both xai and xai-oauth when present", () => {
+		const staleAccess = makeGrokJwt({ sub: "same-user", exp: Math.floor(Date.now() / 1000) - 3600 });
+		const freshAccess = makeGrokJwt({ sub: "same-user", exp: Math.floor(Date.now() / 1000) + 7200 });
+		const staleExp = Date.now() - 60_000;
+		const freshExp = Date.now() + 120_000;
+		writeFileSync(authPath, JSON.stringify({
+			"xai-oauth": {
+				type: "oauth",
+				access: staleAccess,
+				refresh: "stale-refresh",
+				expires: staleExp,
+			},
+			xai: {
+				type: "oauth",
+				access: freshAccess,
+				refresh: "fresh-refresh",
+				expires: freshExp,
+			},
+		}));
+		const accounts = loadGrokAccountsFromPiAuth(authPath);
+		expect(accounts).toHaveLength(2);
+		const keys = accounts.map(a => a.sources[0].providerKey).sort();
+		expect(keys).toEqual(["xai", "xai-oauth"]);
+
+		// loadAll path merges by accountId and keeps the fresher session
+		const merged = loadAllGrokAccounts({
+			piAuthPaths: [authPath],
+			opencodeAuthPath: join(dir, "missing-opencode.json"),
+			hermesAuthPath: join(dir, "missing-hermes.json"),
+			includeEnv: false,
+		});
+		expect(merged).toHaveLength(1);
+		expect(merged[0].refreshToken).toBe("fresh-refresh");
+		expect(merged[0].expiresAt).toBe(freshExp);
+		expect(merged[0].sources).toHaveLength(2);
 	});
 
 	test("returns empty for missing file", () => {
