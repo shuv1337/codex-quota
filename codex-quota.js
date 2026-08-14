@@ -22,6 +22,8 @@ import { decodeJWT, extractAccountId, extractProfile } from "./lib/jwt.js";
 import {
 	printHelp, printHelpCodex, printHelpClaude, printHelpFactory, printHelpFactoryQuota,
 	printHelpGrok, printHelpGrokQuota,
+	printHelpSynthetic, printHelpSyntheticQuota,
+	printHelpAntigravity, printHelpAntigravityQuota,
 	printHelpOpenCodeGo, printHelpOpenCodeGoQuota,
 	printHelpAdd, printHelpCodexReauth, printHelpSwitch, printHelpCodexSync,
 	printHelpList, printHelpRemove, printHelpQuota,
@@ -37,6 +39,8 @@ import {
 	handleQuota,
 	handleProxx,
 	handleGrok,
+	handleSynthetic,
+	handleAntigravity,
 	handleOpenCodeGo,
 } from "./lib/handlers.js";
 
@@ -110,7 +114,9 @@ async function main() {
 	const nonFlagArgs = args.filter((a, i) => !a.startsWith("-") && !flagsWithValues.has(i));
 	const firstArg = nonFlagArgs[0];
 	const namespace = firstArg === "codex" || firstArg === "claude" || firstArg === "factory"
-		|| firstArg === "grok" || firstArg === "opencode-go" || firstArg === "proxx"
+		|| firstArg === "grok" || firstArg === "synthetic" || firstArg === "antigravity"
+		|| firstArg === "opencode-go"
+		|| firstArg === "proxx"
 		? firstArg
 		: null;
 	const namespaceArgs = namespace ? nonFlagArgs.slice(1) : nonFlagArgs;
@@ -175,6 +181,20 @@ async function main() {
 		}
 		return;
 	}
+	if (namespace === "synthetic") {
+		switch (subcommand) {
+			case "quota": printHelpSyntheticQuota(); break;
+			default: printHelpSynthetic(); break;
+		}
+		return;
+	}
+	if (namespace === "antigravity") {
+		switch (subcommand) {
+			case "quota": printHelpAntigravityQuota(); break;
+			default: printHelpAntigravity(); break;
+		}
+		return;
+	}
 	if (namespace === "opencode-go") {
 		switch (subcommand) {
 			case "quota": printHelpOpenCodeGoQuota(); break;
@@ -203,6 +223,14 @@ async function main() {
 	}
 	if (namespace === "grok") {
 		await handleGrok(namespaceArgs, flags);
+		return;
+	}
+	if (namespace === "synthetic") {
+		await handleSynthetic(namespaceArgs, flags);
+		return;
+	}
+	if (namespace === "antigravity") {
+		await handleAntigravity(namespaceArgs, flags);
 		return;
 	}
 	if (namespace === "opencode-go") {
@@ -365,6 +393,14 @@ export {
 	printHelpGrokQuota,
 	buildGrokUsageLines,
 	formatGrokPeriodReset,
+	printHelpSynthetic,
+	printHelpSyntheticQuota,
+	buildSyntheticUsageLines,
+	formatSyntheticReset,
+	printHelpAntigravity,
+	printHelpAntigravityQuota,
+	buildAntigravityUsageLines,
+	formatAntigravityReset,
 	formatClaudeLabel,
 	printHelpOpenCodeGo,
 	printHelpOpenCodeGoQuota,
@@ -396,6 +432,10 @@ export {
 	handleFactoryQuota,
 	handleGrok,
 	handleGrokQuota,
+	handleSynthetic,
+	handleSyntheticQuota,
+	handleAntigravity,
+	handleAntigravityQuota,
 	handleOpenCodeGo,
 	handleOpenCodeGoQuota,
 	buildOpenCodeGoJsonOutput,
@@ -468,7 +508,7 @@ export {
 } from "./lib/factory-tokens.js";
 
 // Token match field maps (for testing)
-export { FACTORY_TOKEN_FIELDS, XAI_TOKEN_FIELDS } from "./lib/token-match.js";
+export { FACTORY_TOKEN_FIELDS, XAI_TOKEN_FIELDS, ANTIGRAVITY_TOKEN_FIELDS } from "./lib/token-match.js";
 
 // Proxx exports
 export { handleProxx, handleProxxQuota } from "./lib/handlers.js";
@@ -524,6 +564,55 @@ export {
 	fetchGrokUsage,
 	enrichGrokAccountFromUserinfo,
 } from "./lib/grok-usage.js";
+
+// Synthetic exports
+export {
+	SYNTHETIC_QUOTAS_URL,
+	SYNTHETIC_TIMEOUT_MS,
+	SYNTHETIC_INTEGRATION_DB_PATH,
+} from "./lib/constants.js";
+export {
+	normalizeSyntheticAccount,
+	loadSyntheticAccountsFromEnv,
+	loadSyntheticAccountsFromIntegrationDb,
+	loadAllSyntheticAccounts,
+	getSyntheticSearchLocations,
+} from "./lib/synthetic-accounts.js";
+export { normalizeSyntheticQuotas, fetchSyntheticUsage } from "./lib/synthetic-usage.js";
+
+// Google AI Pro / Antigravity exports
+export {
+	ANTIGRAVITY_TOKEN_URL,
+	ANTIGRAVITY_CLOUD_CODE_URL,
+	ANTIGRAVITY_TIMEOUT_MS,
+	ANTIGRAVITY_OAUTH_REFRESH_BUFFER_MS,
+	ANTIGRAVITY_METHOD_ID,
+	ANTIGRAVITY_USER_AGENT,
+	ANTIGRAVITY_V1_ACCOUNTS_PATH,
+	ANTIGRAVITY_INTEGRATION_DB_PATHS,
+} from "./lib/constants.js";
+export {
+	resolveAntigravityExpiresAt,
+	splitAntigravityRefresh,
+	normalizeAntigravityAccount,
+	loadAntigravityAccountsFromEnv,
+	loadAntigravityAccountsFromV1File,
+	loadAntigravityAccountsFromIntegrationDb,
+	loadAllAntigravityAccounts,
+	getAllAntigravityLabels,
+	getAntigravitySearchLocations,
+	getAntigravityIntegrationDbPaths,
+} from "./lib/antigravity-accounts.js";
+export {
+	isAntigravityTokenExpiring,
+	refreshAntigravityToken,
+	ensureFreshAntigravityToken,
+} from "./lib/antigravity-tokens.js";
+export {
+	normalizeAntigravityQuota,
+	loadAntigravityProjectId,
+	fetchAntigravityUsage,
+} from "./lib/antigravity-usage.js";
 
 // OpenCode Go dashboard exports
 export {

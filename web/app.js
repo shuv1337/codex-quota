@@ -1,3 +1,5 @@
+import { clampPercent, riskFor } from "./quota-risk.js?v=13";
+
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 75 * 1000;
 const HISTORY_LIMIT = 12;
@@ -6,6 +8,8 @@ const PROVIDER_ICONS = Object.freeze({
 	codex: "/icons/providers/openai.svg",
 	claude: "/icons/providers/anthropic.svg",
 	grok: "/icons/providers/xai.svg",
+	synthetic: "/icons/providers/synthetic.svg",
+	antigravity: "/icons/providers/antigravity.svg",
 	"opencode-go": "/icons/providers/opencode-go.svg",
 });
 
@@ -64,13 +68,6 @@ function image(src, alt = "", className = "") {
 
 function clear(node) {
 	while (node.firstChild) node.firstChild.remove();
-}
-
-function clampPercent(value) {
-	if (value === null || value === undefined || value === "") return null;
-	const parsed = Number(value);
-	if (!Number.isFinite(parsed)) return null;
-	return Math.max(0, Math.min(100, parsed));
 }
 
 function formatPercent(value) {
@@ -139,21 +136,6 @@ function tightestWindow(account) {
 	return windows
 		.filter(window => clampPercent(window?.remainingPercent) !== null)
 		.sort((left, right) => left.remainingPercent - right.remainingPercent)[0] ?? null;
-}
-
-function riskFor(account, window) {
-	if (!account || account.status === "error" || account.status === "unavailable" || !window) {
-		return {
-			id: "unknown",
-			label: account?.status === "error" ? "Unavailable" : "Not reported",
-			copy: "No current runway",
-		};
-	}
-	const remaining = clampPercent(window.remainingPercent);
-	if (remaining <= 15) return { id: "tight", label: "Tight", copy: "Likely to exhaust" };
-	if (remaining <= 35) return { id: "tight", label: "High", copy: "Use with care" };
-	if (remaining <= 55) return { id: "watch", label: "Watch", copy: "Moderate runway" };
-	return { id: "safe", label: "Comfortable", copy: "Healthy runway" };
 }
 
 function showToast(message) {
@@ -229,6 +211,12 @@ function providerSetupHint(providerId) {
 	}
 	if (providerId === "grok") {
 		return "Sign in with SuperGrok OAuth in pi, OpenCode, or Hermes.";
+	}
+	if (providerId === "synthetic") {
+		return "Set SYNTHETIC_API_KEY or configure Synthetic in shuvcode.";
+	}
+	if (providerId === "antigravity") {
+		return "Connect Google AI Pro in shuvcode, or set ANTIGRAVITY_REFRESH.";
 	}
 	return `Run codex-quota ${providerId} add to configure this provider.`;
 }

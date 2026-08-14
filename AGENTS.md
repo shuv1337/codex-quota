@@ -4,7 +4,7 @@ Guidelines for AI coding agents working in this repository.
 
 ## Project Overview
 
-`codex-quota` is a zero-dependency Node.js CLI for managing multiple OpenAI Codex, Claude, Factory.ai, and SuperGrok (xAI OAuth) accounts. Provides account management (add, switch, remove, list, sync) and quota checking using only Node.js built-in modules.
+`codex-quota` is a zero-dependency Node.js CLI for managing multiple OpenAI Codex, Claude, Factory.ai, SuperGrok (xAI OAuth), Synthetic, and Google AI Pro / Antigravity credentials. Provides account management (add, switch, remove, list, sync) and quota checking using only Node.js built-in modules.
 
 ## Tech Stack
 
@@ -51,6 +51,7 @@ codex-quota/
 ├── codex-quota.js            # Entry point: main(), CLI routing, barrel re-exports
 ├── codex-quota.test.js       # Main test suite (imports via barrel re-exports)
 ├── grok.test.js              # SuperGrok / Grok OAuth quota tests
+├── synthetic.test.js         # Synthetic API quota tests
 ├── lib/
 │   ├── constants.js          # All config constants and path definitions
 │   ├── color.js              # Terminal color output helpers
@@ -70,6 +71,11 @@ codex-quota/
 │   ├── grok-accounts.js      # SuperGrok/xAI OAuth account loading from pi/OpenCode/Hermes
 │   ├── grok-tokens.js        # SuperGrok token refresh with fan-out multi-store writeback
 │   ├── grok-usage.js         # SuperGrok weekly credits billing fetch (cli-chat-proxy)
+│   ├── synthetic-accounts.js # Synthetic key loading from env and integration SQLite
+│   ├── synthetic-usage.js    # Synthetic quota normalization and fetch
+│   ├── antigravity-accounts.js # Google AI Pro / Antigravity OAuth loading
+│   ├── antigravity-tokens.js # In-memory Google OAuth refresh (no store writeback)
+│   ├── antigravity-usage.js  # Cloud Code retrieveUserQuotaSummary fetch
 │   ├── codex-usage.js        # Codex usage API fetch
 │   ├── claude-usage.js       # Claude usage API fetch (session + OAuth)
 │   ├── display.js            # Bars, boxes, usage lines, help text, shortenPath
@@ -111,6 +117,11 @@ codex-quota.js (entry)
   ├── lib/grok-accounts.js      ← constants, jwt, paths, token-match
   ├── lib/grok-tokens.js        ← constants, jwt, fs, grok-accounts
   ├── lib/grok-usage.js         ← constants
+  ├── lib/synthetic-accounts.js ← constants
+  ├── lib/synthetic-usage.js    ← constants
+  ├── lib/antigravity-accounts.js ← constants, token-match
+  ├── lib/antigravity-tokens.js ← constants
+  ├── lib/antigravity-usage.js  ← constants
   ├── lib/claude-usage.js       ← constants, paths, claude-accounts, claude-tokens
   ├── lib/display.js            ← constants, color, jwt, claude-usage (for normalizeClaudeOrgId)
   ├── lib/oauth.js              ← constants, jwt
@@ -144,6 +155,8 @@ codex-quota.js (entry)
 | Token persistence changes | `lib/codex-tokens.js`, `lib/claude-tokens.js`, `lib/factory-tokens.js`, or `lib/grok-tokens.js` |
 | New Grok/SuperGrok loader | `lib/grok-accounts.js` |
 | Grok billing fetch | `lib/grok-usage.js` |
+| New Antigravity loader | `lib/antigravity-accounts.js` |
+| Antigravity Cloud Code quota | `lib/antigravity-usage.js` |
 | Sync/divergence logic | `lib/sync.js` |
 | **New export for tests** | Add to the relevant `lib/*.js` module AND add a barrel re-export in `codex-quota.js` |
 
@@ -306,12 +319,27 @@ afterEach(() => {
 
 ### Test Counts
 
-As of latest: **581 tests** across `codex-quota.test.js` + `grok.test.js`. All tests must pass before any commit.
+As of latest: **686 tests** across the repository test files. All tests must pass before any commit.
 
 ### SuperGrok / Grok OAuth notes
 
 - Namespace: `cq grok` / `cq grok quota` (also included in default `cq` / `cq quota`).
-- Phase A is **quota-only**: no add/switch/remove; reads live tokens from pi/shuvpi/shuvhelm (`xai-oauth`), OpenCode (`xai`), Hermes pool/provider, and optional `GROK_ACCOUNTS` env.
+- Phase A is **quota-only**: no add/switch/remove; reads live tokens from pi/shuvpi/shuvhelm (`xai` and `xai-oauth`), OpenCode (`xai`), Hermes pool/provider, and optional `GROK_ACCOUNTS` env.
 - Billing endpoint: `https://cli-chat-proxy.grok.com/v1/billing?format=credits` (weekly credits + Api/GrokBuild product split).
 - **Refresh fan-out hard rule**: xAI rotates refresh tokens. On refresh, write the new access+refresh to every store that held the *same previous refresh token*. Never refresh into an isolated store only — that bricks other agents.
 - Diverged refresh sessions (same user, different refresh) are left alone.
+
+### Synthetic notes
+
+- Namespace: `cq synthetic` / `cq synthetic quota` (also included in default quota output).
+- Credentials are read from `SYNTHETIC_API_KEY`, `SYNTHETIC_ACCOUNTS`, or the shuvcode integration-v2 SQLite database.
+- The SQLite reader dynamically imports `node:sqlite`; Node versions without it skip that optional source.
+- Quota endpoint: `https://api.synthetic.new/v2/quotas` (rolling 5-hour, weekly credits, subscription requests, and hourly search).
+
+### Google AI Pro / Antigravity notes
+
+- Namespace: `cq antigravity` / `cq antigravity quota` (also included in default `cq` / `cq quota`).
+- Quota-only: no add/switch/remove. Reads `ANTIGRAVITY_REFRESH` / `ANTIGRAVITY_ACCOUNTS`, `~/.local/share/opencode/antigravity-accounts.json`, and shuvcode `google` OAuth (`methodID=google-ai-pro`) from `opencode.db` / `opencode-local.db`.
+- Quota endpoint: `POST https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` with `{ project }`. Gemini 5h + weekly, plus unused Claude/GPT buckets.
+- **No refresh writeback.** Google does not rotate this refresh token. Refresh stays in memory so we do not race shuvcode's stored credential.
+- OAuth client id/secret are not in-tree. Set `ANTIGRAVITY_CLIENT_ID` and `ANTIGRAVITY_CLIENT_SECRET` in `~/.codex-quota.env`.

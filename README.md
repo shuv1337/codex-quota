@@ -1,7 +1,7 @@
 # codex-quota
 
 Multi-provider quota monitor and account manager for OpenAI Codex CLI, Claude Code,
-Factory.ai, SuperGrok, and OpenCode Go. Add, switch, list, and remove supported accounts
+Factory.ai, SuperGrok, Synthetic, Google AI Pro / Antigravity, and OpenCode Go. Add, switch, list, and remove supported accounts
 with OAuth browser authentication, and inspect all configured quotas together.
 
 By default, codex-quota now only reads and refreshes credentials from its own managed account files and env vars. Native app auth files from Codex CLI, OpenCode, Claude Code, and pi are no longer imported automatically, which avoids breaking those apps' tokens during refresh. Use `--native` to opt back into the old behavior when needed.
@@ -71,7 +71,7 @@ codex-quota factory remove old-account
 ## shuvquota PWA
 
 `shuvquota` is the installable, responsive companion app for the same quota data shown by
-the CLI. It presents Codex, Claude, SuperGrok, and OpenCode Go usage in one
+the CLI. It presents Codex, Claude, SuperGrok, Antigravity, and OpenCode Go usage in one
 fast-scanning view.
 
 ```bash
@@ -130,6 +130,39 @@ codex-quota claude quota           # All Claude accounts
 codex-quota claude quota work      # Specific credential
 codex-quota claude quota --json    # JSON output
 ```
+
+### synthetic quota
+
+Check Synthetic rolling 5-hour tokens, weekly credits, subscription requests, and
+hourly search requests. The quota request itself does not consume quota.
+
+```bash
+codex-quota synthetic
+codex-quota synthetic quota --compact
+codex-quota synthetic quota --json
+```
+
+The API key is discovered from `SYNTHETIC_API_KEY`, `SYNTHETIC_ACCOUNTS`, or the
+Synthetic credential in shuvcode's integration-v2 database. SQLite discovery uses
+the built-in `node:sqlite` module when available; older Node versions can use an
+environment variable instead.
+
+### antigravity quota
+
+Check Google AI Pro / Antigravity Gemini 5-hour and weekly remaining quota, plus
+unused Claude/GPT buckets. The quota request itself does not consume generate quota.
+
+```bash
+codex-quota antigravity
+codex-quota antigravity quota --compact
+codex-quota antigravity quota --json
+```
+
+Credentials are discovered from `ANTIGRAVITY_REFRESH` / `ANTIGRAVITY_ACCOUNTS`,
+`~/.local/share/opencode/antigravity-accounts.json`, or the shuvcode `google-ai-pro`
+OAuth credential. Token refresh stays in memory and is not written back.
+Set `ANTIGRAVITY_CLIENT_ID` and `ANTIGRAVITY_CLIENT_SECRET` in `~/.codex-quota.env`
+so expired access tokens can refresh.
 
 ### opencode-go quota
 
@@ -391,6 +424,23 @@ Factory sources:
 | `~/.factory-accounts.json` | Factory multi-account file | Yes | Yes (`add`, `remove`) |
 | `~/.factory/auth.v2.file` + `auth.v2.key` | Droid CLI encrypted auth (AES-256-GCM) | Yes | Yes (`switch`) |
 
+Synthetic sources (in order):
+
+| Source | Purpose | Read | Write |
+|--------|---------|------|-------|
+| `SYNTHETIC_API_KEY` env var | Single API key | Yes | No |
+| `SYNTHETIC_ACCOUNTS` env var | JSON array of labeled API keys | Yes | No |
+| `~/.local/share/opencode/opencode-integration-v2.db` | shuvcode Synthetic credential | Yes | No |
+
+Antigravity sources (in order):
+
+| Source | Purpose | Read | Write |
+|--------|---------|------|-------|
+| `ANTIGRAVITY_REFRESH` env var | Single Google AI Pro refresh token | Yes | No |
+| `ANTIGRAVITY_ACCOUNTS` env var | JSON array of labeled OAuth credentials | Yes | No |
+| `~/.local/share/opencode/antigravity-accounts.json` | V1 Antigravity accounts file | Yes | No |
+| `~/.local/share/opencode/opencode.db` | shuvcode `google-ai-pro` OAuth | Yes | No |
+
 ## Multi-Account JSON Schema
 
 File: `~/.codex-accounts.json`
@@ -592,6 +642,19 @@ Codex overrides:
 Factory overrides:
 - `FACTORY_AUTH_FILE_PATH` to point to a different auth.v2.file
 - `FACTORY_AUTH_KEY_PATH` to point to a different auth.v2.key
+
+Synthetic overrides:
+- `SYNTHETIC_API_KEY` to supply one API key
+- `SYNTHETIC_ACCOUNTS` to supply labeled API keys as JSON
+- `SYNTHETIC_INTEGRATION_DB_PATH` to point to a different integration-v2 database
+
+Antigravity overrides:
+- `ANTIGRAVITY_CLIENT_ID` / `ANTIGRAVITY_CLIENT_SECRET` for in-memory token refresh
+- `ANTIGRAVITY_REFRESH` / `ANTIGRAVITY_ACCESS` to supply one Google AI Pro OAuth session
+- `ANTIGRAVITY_ACCOUNTS` to supply labeled OAuth credentials as JSON
+- `ANTIGRAVITY_PROJECT` to set the Cloud Code project id
+- `ANTIGRAVITY_INTEGRATION_DB_PATH` to point to a different shuvcode database
+- `ANTIGRAVITY_V1_ACCOUNTS_PATH` to point to a different V1 accounts file
 
 OpenCode Go dashboard overrides:
 - `OPENCODE_GO_WORKSPACE_ID` for the workspace segment in `/workspace/<id>/go`

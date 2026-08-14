@@ -695,13 +695,17 @@ h1 {
 }
 
 .provider-entry[data-risk="tight"] .quota-progress,
-.provider-entry[data-risk="tight"] .risk-label {
+.provider-entry[data-risk="tight"] .risk-label,
+.provider-entry[data-risk="exhausted"] .quota-progress,
+.provider-entry[data-risk="exhausted"] .risk-label {
 	accent-color: var(--tight);
 	color: var(--tight);
 }
 
 .provider-entry[data-risk="tight"] .quota-progress::-webkit-progress-value,
-.provider-entry[data-risk="tight"] .quota-progress::-moz-progress-bar {
+.provider-entry[data-risk="tight"] .quota-progress::-moz-progress-bar,
+.provider-entry[data-risk="exhausted"] .quota-progress::-webkit-progress-value,
+.provider-entry[data-risk="exhausted"] .quota-progress::-moz-progress-bar {
 	background: var(--tight);
 }
 
@@ -728,7 +732,8 @@ h1 {
 	color: var(--watch);
 }
 
-.provider-entry[data-risk="tight"] .remaining-caption {
+.provider-entry[data-risk="tight"] .remaining-caption,
+.provider-entry[data-risk="exhausted"] .remaining-caption {
 	color: var(--tight);
 }
 
@@ -1150,6 +1155,7 @@ noscript {
 		height: auto;
 		border-right: 0;
 		border-bottom: 1px solid var(--border);
+		padding-top: env(safe-area-inset-top, 0px);
 	}
 
 	.brand {
@@ -1157,7 +1163,7 @@ noscript {
 		flex-direction: row;
 		justify-content: flex-start;
 		gap: 8px;
-		padding: 0 14px;
+		padding: 8px 14px;
 		border-bottom: 0;
 	}
 
@@ -1375,7 +1381,8 @@ noscript {
 		color: var(--watch);
 	}
 
-	.provider-entry[data-risk="tight"] .mobile-risk {
+	.provider-entry[data-risk="tight"] .mobile-risk,
+	.provider-entry[data-risk="exhausted"] .mobile-risk {
 		color: var(--tight);
 	}
 

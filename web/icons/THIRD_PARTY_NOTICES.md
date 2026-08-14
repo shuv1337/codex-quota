@@ -22,6 +22,22 @@ endorsement.
 
 The OpenCode mark remains a trademark of its owner. Inclusion here does not imply endorsement.
 
+## Synthetic
+
+- Asset: `providers/synthetic.svg`
+- Source: Synthetic Lab flower mark as used by CodexBar / Synthetic.new
+- Changes: presentation stroke/fill set to `#F5F3EF` for the dark shuvquota surface
+
+The Synthetic mark remains a trademark of Synthetic Lab, Co. Inclusion here does not imply endorsement.
+
+## Google Antigravity
+
+- Asset: `providers/antigravity.svg`
+- Source: official Google Antigravity app icon from OpenCode / shuvcode UI assets
+- Changes: added a title for accessibility; colors otherwise unchanged
+
+The Google Antigravity mark remains a trademark of Google. Inclusion here does not imply endorsement.
+
 ## Lobe Icons
 
 - Asset: `providers/xai.svg` (the XAI `Mono` icon)

@@ -6,8 +6,8 @@ product
 
 ## Users
 
-Developers and AI-tool power users who manage multiple Codex, Claude, Factory, and Grok
-accounts from a terminal. They need to check quota at a glance, often in narrow split panes,
+Developers and AI-tool power users who manage multiple Codex, Claude, Factory, Grok, and
+Antigravity accounts from a terminal. They need to check quota at a glance, often in narrow split panes,
 without interrupting their current workflow.
 
 ## Product Purpose

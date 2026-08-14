@@ -22,6 +22,7 @@ import {
 	resolveStaticFile,
 	sanitizeDisplayText,
 } from "./shuvquota.js";
+import { riskFor } from "./web/quota-risk.js";
 
 const FIXED_NOW = new Date("2026-07-16T12:00:00.000Z");
 
@@ -121,6 +122,58 @@ function completeRawPayload() {
 				prepaidBalance: 12345,
 			},
 		}],
+		synthetic: [{
+			label: "synthetic<script>",
+			source: "/private/synthetic.db",
+			apiKey: "sk-synthetic-secret",
+			usage: {
+				subscription: { percentRemaining: 75, renewsAt: "2026-08-07T00:00:00Z" },
+				searchHourly: { percentRemaining: 80, renewsAt: "2026-08-06T08:00:00Z" },
+				weeklyTokenLimit: {
+					percentRemaining: 74.15,
+					remainingCredits: "$17.79",
+					maxCredits: "$24.00",
+					nextRegenAt: "2026-08-06T10:00:00Z",
+				},
+				rollingFiveHourLimit: {
+					percentRemaining: 81.6,
+					nextTickAt: "2026-08-06T07:25:00Z",
+				},
+			},
+		}],
+		antigravity: [{
+			label: "antigravity<script>",
+			email: "agy@example.com",
+			projectId: "canvas-secret",
+			paidTier: "g1-pro-tier",
+			source: "/private/opencode.db",
+			access: "ya29.secret",
+			refresh: "1//secret",
+			usage: {
+				groups: [
+					{
+						id: "gemini",
+						displayName: "Gemini Models",
+						buckets: [
+							{
+								bucketId: "gemini-weekly",
+								displayName: "Weekly Limit Remaining",
+								window: "weekly",
+								resetTime: "2026-08-20T21:12:04Z",
+								remainingFraction: 0.82,
+							},
+							{
+								bucketId: "gemini-5h",
+								displayName: "Five Hour Limit Remaining",
+								window: "5h",
+								resetTime: "2026-08-15T01:30:19Z",
+								remainingFraction: 0.004,
+							},
+						],
+					},
+				],
+			},
+		}],
 		"opencode-go": [{
 			label: "dashboard<script>",
 			source: "/private/opencode-go/auth.json",
@@ -156,7 +209,7 @@ function completeRawPayload() {
 }
 
 describe("buildQuotaSnapshot", () => {
-	test("normalizes the four shuvquota provider shapes into the browser DTO", () => {
+	test("normalizes the shuvquota provider shapes into the browser DTO", () => {
 		const snapshot = buildQuotaSnapshot(completeRawPayload(), FIXED_NOW);
 
 		expect(snapshot.schemaVersion).toBe(1);
@@ -165,9 +218,11 @@ describe("buildQuotaSnapshot", () => {
 			"codex",
 			"claude",
 			"grok",
+			"synthetic",
+			"antigravity",
 			"opencode-go",
 		]);
-		expect(snapshot.summary).toEqual({ providerCount: 4, accountCount: 4, attention: 3 });
+		expect(snapshot.summary).toEqual({ providerCount: 6, accountCount: 6, attention: 4 });
 		expect(snapshot.divergence).toEqual({ codex: true, claude: false });
 
 		const codex = snapshot.providers[0].accounts[0];
@@ -203,7 +258,26 @@ describe("buildQuotaSnapshot", () => {
 		expect(grok.windows.map(window => window.usedPercent)).toEqual([32, 12, 100]);
 		expect(grok.status).toBe("attention");
 
-		const opencodeGoProvider = snapshot.providers[3];
+		const synthetic = snapshot.providers[3].accounts[0];
+		expect(synthetic.label).toBe("syntheticscript");
+		expect(synthetic.plan).toBe("Synthetic");
+		expect(synthetic.status).toBe("ok");
+		expect(synthetic.windows.map(window => window.id)).toEqual(["5h", "weekly", "requests", "search"]);
+		expect(synthetic.windows[0].remainingPercent).toBe(81.6);
+
+		const antigravity = snapshot.providers[4].accounts[0];
+		expect(antigravity.label).toBe("antigravityscript");
+		expect(antigravity.email).toBe("a***@example.com");
+		expect(antigravity.plan).toBe("Google AI Pro");
+		expect(antigravity.status).toBe("attention");
+		expect(antigravity.windows[0].label).toBe("Weekly");
+		expect(antigravity.windows[1]).toMatchObject({
+			label: "5h",
+			remainingPercent: 0.4,
+			windowSeconds: 18000,
+		});
+
+		const opencodeGoProvider = snapshot.providers[5];
 		expect(opencodeGoProvider).toMatchObject({ id: "opencode-go", name: "OpenCode Go" });
 		const opencodeGo = opencodeGoProvider.accounts[0];
 		expect(opencodeGo.label).toBe("dashboardscript");
@@ -249,9 +323,11 @@ describe("buildQuotaSnapshot", () => {
 			"codex",
 			"claude",
 			"grok",
+			"synthetic",
+			"antigravity",
 			"opencode-go",
 		]);
-		expect(snapshot.summary).toEqual({ providerCount: 4, accountCount: 0 });
+		expect(snapshot.summary).toEqual({ providerCount: 6, accountCount: 0 });
 		expect(JSON.stringify(snapshot)).not.toContain("factory-secret");
 		expect(JSON.stringify(snapshot)).not.toContain("must-not-render");
 	});
@@ -281,6 +357,12 @@ describe("buildQuotaSnapshot", () => {
 			"opencode-raw-html-secret",
 			"opencode-unknown-secret",
 			"/private/opencode-go/auth.json",
+			"canvas-secret",
+			"ya29.secret",
+			"1//secret",
+			"/private/opencode.db",
+			"sk-synthetic-secret",
+			"/private/synthetic.db",
 		]) {
 			expect(serialized).not.toContain(secret);
 		}
@@ -361,7 +443,9 @@ describe("buildQuotaSnapshot", () => {
 		}, FIXED_NOW);
 		expect(snapshot.divergence).toEqual({ codex: true, claude: false });
 		expect(snapshot.providers[2].name).toBe("SuperGrok");
-		expect(snapshot.providers[3].name).toBe("OpenCode Go");
+		expect(snapshot.providers[3].name).toBe("Synthetic");
+		expect(snapshot.providers[4].name).toBe("Antigravity");
+		expect(snapshot.providers[5].name).toBe("OpenCode Go");
 	});
 });
 
@@ -374,6 +458,32 @@ describe("display sanitization", () => {
 
 	test("removes controls and markup from short display strings", () => {
 		expect(sanitizeDisplayText(" hello\n<script>& world ")).toBe("hello script world");
+	});
+});
+
+describe("quota runway risk", () => {
+	test("labels zero remaining quota as exhausted", () => {
+		expect(riskFor({ status: "attention" }, { remainingPercent: 0 })).toEqual({
+			id: "exhausted",
+			label: "Exhausted",
+			copy: "No quota remaining",
+		});
+	});
+
+	test("keeps non-zero low quota in the tight state", () => {
+		expect(riskFor({ status: "attention" }, { remainingPercent: 0.1 })).toEqual({
+			id: "tight",
+			label: "Tight",
+			copy: "Likely to exhaust",
+		});
+	});
+
+	test("does not mistake missing quota for exhausted quota", () => {
+		expect(riskFor({ status: "ok" }, { remainingPercent: null })).toEqual({
+			id: "unknown",
+			label: "Not reported",
+			copy: "No current runway",
+		});
 	});
 });
 
@@ -536,6 +646,8 @@ describe("static file resolution and MIME", () => {
 			"/sw.js",
 			"/icons/devil-phone.svg",
 			"/icons/providers/opencode-go.svg",
+			"/icons/providers/synthetic.svg",
+			"/icons/providers/antigravity.svg",
 		]) {
 			expect(await resolveStaticFile(path)).not.toBeNull();
 		}
@@ -616,7 +728,7 @@ describe("shuvquota HTTP server", () => {
 		expect(response.status).toBe(200);
 		expect(response.headers["cache-control"]).toContain("no-store");
 		expect(payload.schemaVersion).toBe(1);
-		expect(payload.providers).toHaveLength(4);
+		expect(payload.providers).toHaveLength(6);
 		expect(response.body).not.toContain("acct-secret");
 		expect(quotaCalls).toBe(1);
 	});
