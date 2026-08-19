@@ -9,7 +9,7 @@
     "summary": "Implementation of handleFactoryRemove and handleFactoryList is solid and follows established patterns from handleClaudeRemove and the existing handler architecture. Both handlers support --json output, the remove flow correctly handles non-active removal, active account clearing, last-account file deletion, and non-existent label errors. The list flow correctly loads accounts, displays auth methods, and shows active indicators. 28 tests added covering all specified expectedBehavior items. Two non-blocking test quality issues noted.",
     "issues": [
       {
-        "file": "codex-quota.test.js",
+        "file": "shuvquota.test.js",
         "line": 7938,
         "severity": "non_blocking",
         "description": "The 'confirmation cancel → no changes' test is effectively a no-op. It imports promptConfirm but never invokes handleFactoryRemove in a way that exercises the cancellation flow. It just verifies the file content equals itself (trivially true since no handler was called to modify it). The long comment in the test acknowledges this limitation. The confirmation code path in the handler exists and is structurally correct but has zero test coverage."
@@ -31,7 +31,7 @@
     {
       "area": "conventions",
       "observation": "The handler uses process.exit(1) for error paths, consistent with existing handlers (handleClaudeRemove, handleCodexRemove). However, the handleFactoryRemove has a try/catch that re-throws errors with message starting with 'EXIT_' — this is to allow the test's process.exit mock (which throws Error('EXIT_1')) to propagate. This pattern is used across all Factory handler tests but isn't documented as a convention.",
-      "evidence": "lib/handlers.js:2273 — `if (error.message?.startsWith('EXIT_')) throw error;` — same pattern used in test mocks at codex-quota.test.js:7699 `process.exit = (code) => { exitCode = code; throw new Error('EXIT_${code}'); }`"
+      "evidence": "lib/handlers.js:2273 — `if (error.message?.startsWith('EXIT_')) throw error;` — same pattern used in test mocks at shuvquota.test.js:7699 `process.exit = (code) => { exitCode = code; throw new Error('EXIT_${code}'); }`"
     }
   ],
   "addressesFailureFrom": null,

@@ -207,7 +207,7 @@ function cell(label, className, children) {
 
 function providerSetupHint(providerId) {
 	if (providerId === "opencode-go") {
-		return "Set the OpenCode Go workspace and dashboard cookie in ~/.codex-quota.env.";
+		return "Set the OpenCode Go workspace and dashboard cookie in ~/.shuvquota.env.";
 	}
 	if (providerId === "grok") {
 		return "Sign in with SuperGrok OAuth in pi, OpenCode, or Hermes.";
@@ -218,7 +218,7 @@ function providerSetupHint(providerId) {
 	if (providerId === "antigravity") {
 		return "Connect Google AI Pro in shuvcode, or set ANTIGRAVITY_REFRESH.";
 	}
-	return `Run codex-quota ${providerId} add to configure this provider.`;
+	return `Run shuvquota ${providerId} add to configure this provider.`;
 }
 
 function renderProviderRow(row) {

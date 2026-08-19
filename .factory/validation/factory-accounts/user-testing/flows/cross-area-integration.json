@@ -2,7 +2,7 @@
   "groupId": "cross-area-integration",
   "testedAt": "2026-03-13T00:00:00.000Z",
   "isolation": {
-    "workingDirectory": "/home/shuv/repos/codex-quota",
+    "workingDirectory": "/home/shuv/repos/shuvquota",
     "servicesNeeded": "none",
     "factoryAccountsConfigured": false,
     "factoryApiStatus": "403 (expected)",

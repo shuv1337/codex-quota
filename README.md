@@ -1,71 +1,71 @@
-# codex-quota
+# shuvquota
 
 Multi-provider quota monitor and account manager for OpenAI Codex CLI, Claude Code,
 Factory.ai, SuperGrok, Synthetic, Google AI Pro / Antigravity, and OpenCode Go. Add, switch, list, and remove supported accounts
 with OAuth browser authentication, and inspect all configured quotas together.
 
-By default, codex-quota now only reads and refreshes credentials from its own managed account files and env vars. Native app auth files from Codex CLI, OpenCode, Claude Code, and pi are no longer imported automatically, which avoids breaking those apps' tokens during refresh. Use `--native` to opt back into the old behavior when needed.
+By default, shuvquota now only reads and refreshes credentials from its own managed account files and env vars. Native app auth files from Codex CLI, OpenCode, Claude Code, and pi are no longer imported automatically, which avoids breaking those apps' tokens during refresh. Use `--native` to opt back into the old behavior when needed.
 
 Zero dependencies - uses Node.js built-ins only.
 
 ## Installation
 
 ```bash
-npm install -g codex-quota
+npm install -g shuvquota
 ```
 
 Or with bun:
 
 ```bash
-bun add -g codex-quota
+bun add -g shuvquota
 ```
 
-After installation, both `codex-quota` and `cq` commands are available.
+After installation, both `shuvquota` and `cq` commands are available.
 
 ## Quick Start
 
 ```bash
 # Add a new account (opens browser for OAuth)
-codex-quota codex add personal
+shuvquota codex add personal
 
 # Add a Claude credential (interactive)
-codex-quota claude add work
+shuvquota claude add work
 
 # Add a Factory account (imports from Droid CLI auth.v2 files)
-codex-quota factory add work
+shuvquota factory add work
 
 # Check quota for all accounts
-codex-quota
-
-# Open the installable quota dashboard
 shuvquota
 
+# Open the installable quota dashboard
+shuvquota-server
+
 # Switch active Codex account
-codex-quota codex switch personal
+shuvquota codex switch personal
 
 # Switch Claude credentials
-codex-quota claude switch work
+shuvquota claude switch work
 
 # Switch Factory account
-codex-quota factory switch work
+shuvquota factory switch work
 
 # Sync activeLabel to CLI auth files
-codex-quota codex sync
-codex-quota claude sync
+shuvquota codex sync
+shuvquota claude sync
 
 # Preview sync without writing files
-codex-quota codex sync --dry-run
-codex-quota claude sync --dry-run
+shuvquota codex sync --dry-run
+shuvquota claude sync --dry-run
 
 # List accounts
-codex-quota codex list
-codex-quota claude list
-codex-quota factory list
+shuvquota codex list
+shuvquota claude list
+shuvquota factory list
 
 # Remove an account
-codex-quota codex remove old-account
-codex-quota claude remove old-account
-codex-quota factory remove old-account
+shuvquota codex remove old-account
+shuvquota claude remove old-account
+shuvquota factory remove old-account
 ```
 
 ## shuvquota PWA
@@ -109,16 +109,16 @@ included server binds to loopback by default.
 
 ## Commands
 
-Run `codex-quota` with no namespace to check all configured quota providers.
+Run `shuvquota` with no namespace to check all configured quota providers.
 
 ### codex quota
 
 Check usage quota for Codex accounts.
 
 ```bash
-codex-quota codex quota            # All Codex accounts
-codex-quota codex quota personal   # Specific account
-codex-quota codex quota --json     # JSON output
+shuvquota codex quota            # All Codex accounts
+shuvquota codex quota personal   # Specific account
+shuvquota codex quota --json     # JSON output
 ```
 
 ### claude quota
@@ -126,9 +126,9 @@ codex-quota codex quota --json     # JSON output
 Check usage quota for Claude accounts.
 
 ```bash
-codex-quota claude quota           # All Claude accounts
-codex-quota claude quota work      # Specific credential
-codex-quota claude quota --json    # JSON output
+shuvquota claude quota           # All Claude accounts
+shuvquota claude quota work      # Specific credential
+shuvquota claude quota --json    # JSON output
 ```
 
 ### synthetic quota
@@ -137,9 +137,9 @@ Check Synthetic rolling 5-hour tokens, weekly credits, subscription requests, an
 hourly search requests. The quota request itself does not consume quota.
 
 ```bash
-codex-quota synthetic
-codex-quota synthetic quota --compact
-codex-quota synthetic quota --json
+shuvquota synthetic
+shuvquota synthetic quota --compact
+shuvquota synthetic quota --json
 ```
 
 The API key is discovered from `SYNTHETIC_API_KEY`, `SYNTHETIC_ACCOUNTS`, or the
@@ -153,15 +153,15 @@ Check Google AI Pro / Antigravity Gemini 5-hour and weekly remaining quota, plus
 unused Claude/GPT buckets. The quota request itself does not consume generate quota.
 
 ```bash
-codex-quota antigravity
-codex-quota antigravity quota --compact
-codex-quota antigravity quota --json
+shuvquota antigravity
+shuvquota antigravity quota --compact
+shuvquota antigravity quota --json
 ```
 
 Credentials are discovered from `ANTIGRAVITY_REFRESH` / `ANTIGRAVITY_ACCOUNTS`,
 `~/.local/share/opencode/antigravity-accounts.json`, or the shuvcode `google-ai-pro`
 OAuth credential. Token refresh stays in memory and is not written back.
-Set `ANTIGRAVITY_CLIENT_ID` and `ANTIGRAVITY_CLIENT_SECRET` in `~/.codex-quota.env`
+Set `ANTIGRAVITY_CLIENT_ID` and `ANTIGRAVITY_CLIENT_SECRET` in `~/.shuvquota.env`
 so expired access tokens can refresh.
 
 ### opencode-go quota
@@ -170,14 +170,14 @@ Check the rolling 5-hour, weekly, and monthly limits shown by the authenticated
 OpenCode Go workspace dashboard:
 
 ```bash
-codex-quota opencode-go quota
-codex-quota opencode-go quota --compact
-codex-quota opencode-go quota --json
+shuvquota opencode-go quota
+shuvquota opencode-go quota --compact
+shuvquota opencode-go quota --json
 ```
 
 OpenCode's production API does not currently expose Go usage to an API key, so
 this integration reads the same server-rendered page as the signed-in dashboard.
-Configure the workspace and browser session in `~/.codex-quota.env`:
+Configure the workspace and browser session in `~/.shuvquota.env`:
 
 ```dotenv
 OPENCODE_GO_WORKSPACE_ID=wrk_...
@@ -185,7 +185,7 @@ OPENCODE_GO_AUTH_COOKIE=...
 OPENCODE_GO_LABEL=go
 ```
 
-Protect the file with `chmod 600 ~/.codex-quota.env`. The label is optional and
+Protect the file with `chmod 600 ~/.shuvquota.env`. The label is optional and
 defaults to `go`. The HttpOnly cookie expires with the web session; if the command
 returns an authentication error, sign in at `opencode.ai` and replace the value.
 The cookie, workspace ID, response HTML, and credential source are never included
@@ -196,9 +196,9 @@ in CLI JSON or browser API responses.
 Add a new Codex account via OAuth browser authentication.
 
 ```bash
-codex-quota codex add                # Label derived from email
-codex-quota codex add work           # With explicit label
-codex-quota codex add --no-browser   # Print URL (for SSH/headless)
+shuvquota codex add                # Label derived from email
+shuvquota codex add work           # With explicit label
+shuvquota codex add --no-browser   # Print URL (for SSH/headless)
 ```
 
 ### claude add
@@ -206,9 +206,9 @@ codex-quota codex add --no-browser   # Print URL (for SSH/headless)
 Add a Claude credential interactively.
 
 ```bash
-codex-quota claude add               # Prompt for label + credentials
-codex-quota claude add work          # With explicit label
-codex-quota claude add work --json   # JSON output
+shuvquota claude add               # Prompt for label + credentials
+shuvquota claude add work          # With explicit label
+shuvquota claude add work --json   # JSON output
 ```
 
 ### codex switch
@@ -216,7 +216,7 @@ codex-quota claude add work --json   # JSON output
 Switch the active account for Codex CLI, OpenCode, and pi.
 
 ```bash
-codex-quota codex switch personal
+shuvquota codex switch personal
 ```
 
 When you run `codex switch`:
@@ -232,7 +232,7 @@ It also updates `activeLabel` in `~/.codex-accounts.json` when available.
 Switch Claude Code, OpenCode, and pi to a stored Claude credential.
 
 ```bash
-codex-quota claude switch work
+shuvquota claude switch work
 ```
 
 This updates `activeLabel` in `~/.claude-accounts.json` when available. OAuth-based
@@ -240,11 +240,11 @@ credentials are required to update CLI auth files.
 
 ### codex list
 
-List all Codex accounts from codex-quota-managed sources with status indicators.
+List all Codex accounts from shuvquota-managed sources with status indicators.
 
 ```bash
-codex-quota codex list
-codex-quota codex list --json
+shuvquota codex list
+shuvquota codex list --json
 ```
 
 Output shows:
@@ -254,7 +254,7 @@ Output shows:
 - Source file for each account
 
 If CLI auth diverges from the tracked `activeLabel`, `list` and `quota` print a warning and
-suggest `codex-quota codex sync` to realign when `--native` is used.
+suggest `shuvquota codex sync` to realign when `--native` is used.
 
 ### claude list
 
@@ -262,8 +262,8 @@ List Claude credentials from `CLAUDE_ACCOUNTS` or `~/.claude-accounts.json`.
 By default this excludes native Claude Code / OpenCode auth files unless `--native` is used.
 
 ```bash
-codex-quota claude list
-codex-quota claude list --json
+shuvquota claude list
+shuvquota claude list --json
 ```
 
 Output shows:
@@ -278,7 +278,7 @@ For OAuth-based accounts, `list` and `quota` warn when stored tokens diverge fro
 Remove a Codex account from storage.
 
 ```bash
-codex-quota codex remove old-account
+shuvquota codex remove old-account
 ```
 
 Note: Accounts from `CODEX_ACCOUNTS` env var cannot be removed via CLI.
@@ -288,7 +288,7 @@ Note: Accounts from `CODEX_ACCOUNTS` env var cannot be removed via CLI.
 Remove a Claude credential from storage.
 
 ```bash
-codex-quota claude remove old-account
+shuvquota claude remove old-account
 ```
 
 Note: Accounts from `CLAUDE_ACCOUNTS` env var cannot be removed via CLI.
@@ -298,9 +298,9 @@ Note: Accounts from `CLAUDE_ACCOUNTS` env var cannot be removed via CLI.
 Sync the `activeLabel` Codex account to CLI auth files.
 
 ```bash
-codex-quota codex sync
-codex-quota codex sync --dry-run
-codex-quota codex sync --json
+shuvquota codex sync
+shuvquota codex sync --dry-run
+shuvquota codex sync --json
 ```
 
 This updates:
@@ -315,9 +315,9 @@ Note: `sync` still writes native app auth files. What changed is the default rea
 Sync the `activeLabel` Claude account to CLI auth files.
 
 ```bash
-codex-quota claude sync
-codex-quota claude sync --dry-run
-codex-quota claude sync --json
+shuvquota claude sync
+shuvquota claude sync --dry-run
+shuvquota claude sync --json
 ```
 
 Only OAuth-based Claude accounts can be synced. Session-key-only accounts are skipped with
@@ -328,10 +328,10 @@ a warning.
 Check usage quota for Factory accounts using the Factory Analytics API.
 
 ```bash
-codex-quota factory quota                # All Factory accounts
-codex-quota factory quota work           # Specific account
-codex-quota factory quota --json         # JSON output
-codex-quota factory quota --billing-day 15  # Custom billing period start day
+shuvquota factory quota                # All Factory accounts
+shuvquota factory quota work           # Specific account
+shuvquota factory quota --json         # JSON output
+shuvquota factory quota --billing-day 15  # Custom billing period start day
 ```
 
 The `--billing-day` flag sets the day of month when the billing period starts (defaults to 1).
@@ -341,8 +341,8 @@ The `--billing-day` flag sets the day of month when the billing period starts (d
 Import a Factory account from Droid CLI auth.v2 encrypted files.
 
 ```bash
-codex-quota factory add                  # Label derived from token
-codex-quota factory add work             # With explicit label
+shuvquota factory add                  # Label derived from token
+shuvquota factory add work             # With explicit label
 ```
 
 Reads `~/.factory/auth.v2.file` and `~/.factory/auth.v2.key` (AES-256-GCM encrypted)
@@ -353,7 +353,7 @@ and saves the decrypted credentials to `~/.factory-accounts.json`.
 Switch the active Factory account.
 
 ```bash
-codex-quota factory switch work
+shuvquota factory switch work
 ```
 
 Updates `activeLabel` in `~/.factory-accounts.json` and writes back to the
@@ -364,8 +364,8 @@ encrypted auth.v2 files.
 List all Factory accounts with status indicators.
 
 ```bash
-codex-quota factory list
-codex-quota factory list --json
+shuvquota factory list
+shuvquota factory list --json
 ```
 
 ### factory remove
@@ -373,7 +373,7 @@ codex-quota factory list --json
 Remove a Factory account from storage.
 
 ```bash
-codex-quota factory remove old-account
+shuvquota factory remove old-account
 ```
 
 ## Options
@@ -381,7 +381,7 @@ codex-quota factory remove old-account
 | Option | Description |
 |--------|-------------|
 | `--json` | Output in JSON format |
-| `--local` | Use only codex-quota-managed files; skip native app auth checks (default) |
+| `--local` | Use only shuvquota-managed files; skip native app auth checks (default) |
 | `--native` | Include native app auth files in reads/checks for list/quota/divergence |
 | `--dry-run` | Preview sync without writing files |
 | `--billing-day` | Set billing period start day (1–31, default 1, Factory only) |
@@ -404,7 +404,7 @@ reads from or writes to each path.
 | `~/.local/share/opencode/auth.json` | OpenCode auth file (`openai` provider) | No | Yes (`switch`, `sync` if it exists) |
 | `~/.pi/agent/auth.json` | pi auth file (`openai-codex` provider) | No | Yes (`switch`, `sync` if it exists) |
 
-New accounts added via `codex-quota codex add` are saved to `~/.codex-accounts.json`, which is
+New accounts added via `shuvquota codex add` are saved to `~/.codex-accounts.json`, which is
 shared with OpenCode.
 
 Claude sources (in order):
@@ -496,7 +496,7 @@ The `codex add` command uses OAuth 2.0 with PKCE for secure browser authenticati
 In SSH sessions or headless environments (detected via `SSH_CLIENT`, `SSH_TTY`, or missing `DISPLAY`), the auth URL is printed instead of opening a browser:
 
 ```bash
-codex-quota codex add --no-browser
+shuvquota codex add --no-browser
 # Prints: Open this URL in your browser: https://auth.openai.com/authorize?...
 ```
 
@@ -507,11 +507,11 @@ Copy the URL to a browser on another machine, complete authentication, and the c
 ### Port 1455 in use
 
 ```
-Error: Port 1455 is in use. Close other codex-quota instances and retry.
+Error: Port 1455 is in use. Close other shuvquota instances and retry.
 ```
 
 Another process is using port 1455. Check for:
-- Other `codex-quota codex add` commands running
+- Other `shuvquota codex add` commands running
 - OpenCode or Codex CLI auth processes
 
 Find and kill the process:
@@ -524,7 +524,7 @@ kill <pid>
 
 If browser doesn't open in SSH session:
 
-1. Use `--no-browser` flag: `codex-quota codex add --no-browser`
+1. Use `--no-browser` flag: `shuvquota codex add --no-browser`
 2. Copy the printed URL to a browser on another machine
 3. Complete authentication in browser
 4. The callback is received by the server running over SSH
@@ -533,13 +533,13 @@ If browser doesn't open in SSH session:
 
 If token refresh fails:
 ```
-Error: Failed to refresh token. Re-authenticate with 'codex-quota codex add'.
+Error: Failed to refresh token. Re-authenticate with 'shuvquota codex add'.
 ```
 
 The refresh token may have expired. Add the account again:
 ```bash
-codex-quota codex remove expired-account
-codex-quota codex add new-label
+shuvquota codex remove expired-account
+shuvquota codex add new-label
 ```
 
 ### Environment variable accounts
@@ -557,27 +557,27 @@ All commands support `--json` for scripting:
 
 ```bash
 # Quota (combined)
-codex-quota --json
+shuvquota --json
 # {"codex":[...],"claude":[...],"factory":[...],"grok":[...],"opencode-go":[...]}
 
 # List (Codex)
-codex-quota codex list --json
+shuvquota codex list --json
 # {"accounts":[{"label":"personal","isActive":true,"email":"...","source":"..."}]}
 
 # Add (Codex, success)
-codex-quota codex add work --json
+shuvquota codex add work --json
 # {"success":true,"label":"work","email":"user@example.com","accountId":"...","source":"~/.codex-accounts.json"}
 
 # Switch (Codex)
-codex-quota codex switch personal --json
+shuvquota codex switch personal --json
 # {"success":true,"label":"personal","email":"...","authPath":"~/.codex/auth.json"}
 
 # Sync (Codex)
-codex-quota codex sync --json
+shuvquota codex sync --json
 # {"success":true,"activeLabel":"work","updated":["~/.codex/auth.json",...],"skipped":[...]}
 
 # Errors include structured data
-codex-quota codex switch nonexistent --json
+shuvquota codex switch nonexistent --json
 # {"success":false,"error":"Account not found","availableLabels":["personal","work"]}
 ```
 
@@ -586,7 +586,7 @@ codex-quota codex switch nonexistent --json
 Use the `claude` namespace to check Claude usage alongside OpenAI quotas:
 
 ```bash
-codex-quota claude quota
+shuvquota claude quota
 ```
 
 If multiple Claude accounts are configured, each account is fetched and displayed separately.
@@ -594,7 +594,7 @@ If multiple Claude accounts are configured, each account is fetched and displaye
 To add a Claude credential interactively:
 
 ```bash
-codex-quota claude add
+shuvquota claude add
 ```
 
 This uses your local Claude session to call:

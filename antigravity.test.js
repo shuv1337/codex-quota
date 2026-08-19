@@ -27,7 +27,7 @@ import {
 	buildAntigravityUsageLines,
 	printHelp,
 	printHelpAntigravity,
-} from "./codex-quota.js";
+} from "./shuvquota.js";
 
 const QUOTA = {
 	groups: [
@@ -83,8 +83,8 @@ describe("Antigravity constants", () => {
 });
 
 describe("Antigravity account discovery", () => {
-	const dbPath = join(tmpdir(), `codex-quota-antigravity-${process.pid}.db`);
-	const v1Path = join(tmpdir(), `codex-quota-antigravity-${process.pid}.json`);
+	const dbPath = join(tmpdir(), `shuvquota-antigravity-${process.pid}.db`);
+	const v1Path = join(tmpdir(), `shuvquota-antigravity-${process.pid}.json`);
 	let originalRefresh;
 	let originalAccounts;
 	let originalLabel;

@@ -2,7 +2,7 @@
   "groupId": "cross-area",
   "testedAt": "2026-03-13T07:15:00.000Z",
   "isolation": {
-    "workingDirectory": "/home/shuv/repos/codex-quota",
+    "workingDirectory": "/home/shuv/repos/shuvquota",
     "services": "none",
     "factoryAccounts": "none configured",
     "factoryApiStatus": "403 (expected)"
@@ -15,12 +15,12 @@
       "status": "pass",
       "steps": [
         {
-          "action": "Run `node codex-quota.js` with no Factory accounts configured",
+          "action": "Run `node shuvquota.js` with no Factory accounts configured",
           "expected": "Codex/Claude displayed normally, exit code 0, no Factory errors in stderr",
           "observed": "Codex and Claude quota boxes displayed normally, exit code 0, stderr empty"
         },
         {
-          "action": "Run `node codex-quota.js --json` with no Factory accounts",
+          "action": "Run `node shuvquota.js --json` with no Factory accounts",
           "expected": "JSON output includes factory key with no error, exit code 0",
           "observed": "JSON output has \"factory\": [] (empty array, no error object), exit code 0, stderr empty"
         }
@@ -54,7 +54,7 @@
           "observed": "MULTI_ACCOUNT_PATHS (line 49): codex-accounts.json + opencode path. CLAUDE_MULTI_ACCOUNT_PATHS (line 22): claude-accounts.json. Both unchanged. Factory uses separate FACTORY_MULTI_ACCOUNT_PATH constant."
         },
         {
-          "action": "Run `node codex-quota.js codex quota` and `node codex-quota.js claude quota`",
+          "action": "Run `node shuvquota.js codex quota` and `node shuvquota.js claude quota`",
           "expected": "Existing Codex/Claude commands work unchanged",
           "observed": "Both commands display their respective quota boxes normally with exit code 0"
         }
@@ -73,24 +73,24 @@
       "status": "pass",
       "steps": [
         {
-          "action": "Run `node codex-quota.js factory quota`",
+          "action": "Run `node shuvquota.js factory quota`",
           "expected": "Routes to Factory handlers",
           "observed": "Routes to Factory handler, shows 'No Factory accounts found' with guidance (expected, no accounts configured)"
         },
         {
-          "action": "Run `node codex-quota.js codex quota`",
+          "action": "Run `node shuvquota.js codex quota`",
           "expected": "Routes to Codex handlers unchanged",
           "observed": "Displays Codex quota boxes normally, exit code 0"
         },
         {
-          "action": "Run `node codex-quota.js claude quota`",
+          "action": "Run `node shuvquota.js claude quota`",
           "expected": "Routes to Claude handlers unchanged",
           "observed": "Displays Claude quota boxes normally, exit code 0"
         },
         {
-          "action": "Run `node codex-quota.js add` (bare legacy command)",
+          "action": "Run `node shuvquota.js add` (bare legacy command)",
           "expected": "Error message does not reference Factory",
-          "observed": "Error: 'add' now requires a namespace. Use 'codex-quota codex add' or 'codex-quota claude add'. No mention of factory."
+          "observed": "Error: 'add' now requires a namespace. Use 'shuvquota codex add' or 'shuvquota claude add'. No mention of factory."
         },
         {
           "action": "Run unit tests for Factory routing: `bun test --grep 'handleFactory'`",
@@ -123,13 +123,13 @@
         },
         {
           "action": "Verify barrel re-exports for all new Factory functions",
-          "expected": "Every new exported function has a barrel re-export in codex-quota.js",
+          "expected": "Every new exported function has a barrel re-export in shuvquota.js",
           "observed": "factory-accounts.js: 9/9 re-exported. factory-usage.js: 4/4 re-exported. factory-crypto.js: 5/5 re-exported. display.js factory exports: 4/4. handlers.js factory exports: 2/2. All accounted for."
         },
         {
           "action": "Verify test conventions: describe/test/expect, env cleanup, temp file isolation",
           "expected": "New tests follow project conventions",
-          "observed": "Tests use bun:test imports (describe, test, expect, beforeEach, afterEach). Tests import from ./codex-quota.js barrel. env cleanup in afterEach. Temp files use os.tmpdir(). 114 Factory-specific tests all pass."
+          "observed": "Tests use bun:test imports (describe, test, expect, beforeEach, afterEach). Tests import from ./shuvquota.js barrel. env cleanup in afterEach. Temp files use os.tmpdir(). 114 Factory-specific tests all pass."
         }
       ],
       "evidence": {

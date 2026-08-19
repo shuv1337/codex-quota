@@ -15,7 +15,7 @@
         "description": "FACTORY_AUTH_KEY_PATH is imported from constants.js but never used in the handlers module. It's included in the import block alongside FACTORY_MULTI_ACCOUNT_PATH and FACTORY_AUTH_FILE_PATH, but only the latter two are referenced in the 'no accounts' error output. The key file is a companion to the auth file so omitting it from user-facing messages is reasonable, but the unused import should be cleaned up."
       },
       {
-        "file": "codex-quota.js",
+        "file": "shuvquota.js",
         "line": 52,
         "severity": "non_blocking",
         "description": "Duplicate computation of billing-day index. The variable billingDayIdx (line 52) and billingDayArgIdx (line 76) both compute args.indexOf('--billing-day'). The second lookup exists solely to populate the flagsWithValues set for nonFlagArgs filtering. Could consolidate to reuse a single const, but this is a minor DRY concern with no functional impact."
@@ -32,12 +32,12 @@
     {
       "area": "conventions",
       "observation": "The --billing-day flag introduces a new pattern: flags with values (--flag N). The main() arg parser now has special handling to exclude the flag's value from nonFlagArgs. If future flags with values are added (e.g., --output-format, --timeout), this manual exclusion approach will become unwieldy. AGENTS.md and architecture docs don't document this flag-value parsing pattern or suggest a general approach.",
-      "evidence": "codex-quota.js lines 52-60 (billingDayIdx parsing) and lines 74-80 (flagsWithValues set). Each new flag-with-value would need its own indexOf + Set.add pair."
+      "evidence": "shuvquota.js lines 52-60 (billingDayIdx parsing) and lines 74-80 (flagsWithValues set). Each new flag-with-value would need its own indexOf + Set.add pair."
     },
     {
       "area": "conventions",
-      "observation": "handleQuota was not previously exported as a barrel re-export in codex-quota.js. This commit adds it, enabling direct test invocation. The AGENTS.md architecture section doesn't note that handleQuota is the central quota aggregator that combines all providers, which may be useful for future workers extending it.",
-      "evidence": "codex-quota.js barrel re-exports block — handleQuota added at line 291 alongside handleFactory/handleFactoryQuota."
+      "observation": "handleQuota was not previously exported as a barrel re-export in shuvquota.js. This commit adds it, enabling direct test invocation. The AGENTS.md architecture section doesn't note that handleQuota is the central quota aggregator that combines all providers, which may be useful for future workers extending it.",
+      "evidence": "shuvquota.js barrel re-exports block — handleQuota added at line 291 alongside handleFactory/handleFactoryQuota."
     }
   ],
   "addressesFailureFrom": null,

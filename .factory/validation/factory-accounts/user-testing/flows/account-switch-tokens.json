@@ -2,13 +2,13 @@
   "groupId": "account-switch-tokens",
   "testedAt": "2026-03-13T12:00:00.000Z",
   "isolation": {
-    "workingDirectory": "/home/shuv/repos/codex-quota",
+    "workingDirectory": "/home/shuv/repos/shuvquota",
     "noServicesNeeded": true,
     "noFactoryAccountsConfigured": true,
     "factoryApiReturns403": true,
     "noFileModifications": true
   },
-  "toolsUsed": ["bun test --grep", "node codex-quota.js", "source code inspection"],
+  "toolsUsed": ["bun test --grep", "node shuvquota.js", "source code inspection"],
   "assertions": [
     {
       "id": "VAL-ACCT-004",
@@ -59,19 +59,19 @@
           "observed": "All 12 tests pass including: 'non-existent label → error with available labels', 'missing label argument → usage message', 'no container file → error', 'account without authFile/authKey → error', plus JSON variants of each error case"
         },
         {
-          "action": "Run node codex-quota.js factory switch nonexistent",
+          "action": "Run node shuvquota.js factory switch nonexistent",
           "expected": "Error message with available labels listed, exit code 1",
-          "observed": "stderr: 'Error: No Factory accounts configured. Run codex-quota factory add to add an account.' exit code 1 (no container exists in this environment, so error is about missing accounts)"
+          "observed": "stderr: 'Error: No Factory accounts configured. Run shuvquota factory add to add an account.' exit code 1 (no container exists in this environment, so error is about missing accounts)"
         },
         {
-          "action": "Run node codex-quota.js factory switch (no label)",
+          "action": "Run node shuvquota.js factory switch (no label)",
           "expected": "Usage message, exit code 1",
-          "observed": "stderr: 'Usage: codex-quota factory switch <label>\\nSwitches the active Factory account and writes auth.v2 files.' exit code 1"
+          "observed": "stderr: 'Usage: shuvquota factory switch <label>\\nSwitches the active Factory account and writes auth.v2 files.' exit code 1"
         },
         {
-          "action": "Run node codex-quota.js factory switch testlabel (no container file)",
+          "action": "Run node shuvquota.js factory switch testlabel (no container file)",
           "expected": "Error about no container file, exit code 1",
-          "observed": "stderr: 'Error: No Factory accounts configured. Run codex-quota factory add to add an account.' exit code 1"
+          "observed": "stderr: 'Error: No Factory accounts configured. Run shuvquota factory add to add an account.' exit code 1"
         }
       ],
       "evidence": {
@@ -171,7 +171,7 @@
         {
           "action": "Search for VAL-CROSS-005 tagged test in test file",
           "expected": "Dedicated integration test exists",
-          "observed": "No test explicitly tagged VAL-CROSS-005 exists in codex-quota.test.js"
+          "observed": "No test explicitly tagged VAL-CROSS-005 exists in shuvquota.test.js"
         },
         {
           "action": "Inspect handleFactoryQuota implementation in lib/handlers.js line 2483",

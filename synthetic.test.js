@@ -19,7 +19,7 @@ import {
 	buildSyntheticUsageLines,
 	printHelp,
 	printHelpSynthetic,
-} from "./codex-quota.js";
+} from "./shuvquota.js";
 
 const QUOTAS = {
 	subscription: { limit: 500, requests: 125, renewsAt: "2026-08-07T00:00:00Z" },
@@ -51,7 +51,7 @@ describe("Synthetic constants", () => {
 });
 
 describe("Synthetic account discovery", () => {
-	const dbPath = join(tmpdir(), `codex-quota-synthetic-${process.pid}.db`);
+	const dbPath = join(tmpdir(), `shuvquota-synthetic-${process.pid}.db`);
 	let originalApiKey;
 	let originalAccounts;
 	let originalLabel;

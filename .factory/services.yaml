@@ -3,4 +3,4 @@ commands:
   test: bun test
   test_grep: bun test --grep
   preflight: node scripts/preflight.js
-  start: node codex-quota.js
+  start: node shuvquota.js

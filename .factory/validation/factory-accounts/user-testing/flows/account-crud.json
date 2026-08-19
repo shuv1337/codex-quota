@@ -2,13 +2,13 @@
   "groupId": "account-crud",
   "testedAt": "2026-03-13T00:00:00.000Z",
   "isolation": {
-    "workingDirectory": "/home/shuv/repos/codex-quota",
+    "workingDirectory": "/home/shuv/repos/shuvquota",
     "factoryAccountsConfigured": false,
     "factoryApiStatus": "403 (expected)",
     "authV2FilesExist": true,
     "authV2FilesReadable": false
   },
-  "toolsUsed": ["bun test", "node codex-quota.js"],
+  "toolsUsed": ["bun test", "node shuvquota.js"],
   "assertions": [
     {
       "id": "VAL-ACCT-001",
@@ -21,12 +21,12 @@
           "observed": "18 pass, 0 fail, 51 expect() calls"
         },
         {
-          "action": "Run node codex-quota.js factory add (live CLI, auth.v2 files exist but unreadable)",
+          "action": "Run node shuvquota.js factory add (live CLI, auth.v2 files exist but unreadable)",
           "expected": "Graceful error about decrypt failure",
           "observed": "Error: Failed to decrypt Factory auth files. The files may be corrupt or the key may be invalid. EXIT_CODE=1"
         },
         {
-          "action": "Run node codex-quota.js factory add --json (live CLI)",
+          "action": "Run node shuvquota.js factory add --json (live CLI)",
           "expected": "JSON error output",
           "observed": "{\"success\":false,\"error\":\"Failed to decrypt Factory auth files...\"} EXIT_CODE=1"
         }
@@ -49,7 +49,7 @@
           "observed": "All 18 tests pass. Specific error tests: 'missing auth.v2 files → error referencing droid login' (pass), 'duplicate label rejected with error' (pass), 'corrupt auth.v2 → decryption error without crash' (pass), 'invalid label format rejected (spaces)' (pass), 'invalid label format rejected (special chars)' (pass), 'invalid API key (not starting with fk-) rejected' (pass)"
         },
         {
-          "action": "Run node codex-quota.js factory add (auth.v2 files exist but corrupt/unreadable key)",
+          "action": "Run node shuvquota.js factory add (auth.v2 files exist but corrupt/unreadable key)",
           "expected": "Graceful error, no crash",
           "observed": "Error: Failed to decrypt Factory auth files. EXIT_CODE=1 (no crash, clean error)"
         }
@@ -124,12 +124,12 @@
           "observed": "Pass"
         },
         {
-          "action": "Run node codex-quota.js factory remove (no label, live CLI)",
+          "action": "Run node shuvquota.js factory remove (no label, live CLI)",
           "expected": "Usage message with exit code 1",
-          "observed": "Usage: codex-quota factory remove <label>\nRemoves a Factory account from the multi-account file. EXIT_CODE=1"
+          "observed": "Usage: shuvquota factory remove <label>\nRemoves a Factory account from the multi-account file. EXIT_CODE=1"
         },
         {
-          "action": "Run node codex-quota.js factory remove nonexistent --json (live CLI)",
+          "action": "Run node shuvquota.js factory remove nonexistent --json (live CLI)",
           "expected": "JSON error about no accounts",
           "observed": "{\"success\":false,\"error\":\"No Factory accounts configured.\"} EXIT_CODE=1"
         }
@@ -182,12 +182,12 @@
           "observed": "All 4 pass"
         },
         {
-          "action": "Run node codex-quota.js factory list (live CLI, no accounts)",
+          "action": "Run node shuvquota.js factory list (live CLI, no accounts)",
           "expected": "Guidance message suggesting factory add",
-          "observed": "No Factory accounts found.\n\nSearched:\n  - FACTORY_ACCOUNTS env var\n  - ~/.factory-accounts.json\n  - ~/.factory/auth.v2.file\n\nRun 'codex-quota factory add' to add an account. EXIT_CODE=0"
+          "observed": "No Factory accounts found.\n\nSearched:\n  - FACTORY_ACCOUNTS env var\n  - ~/.factory-accounts.json\n  - ~/.factory/auth.v2.file\n\nRun 'shuvquota factory add' to add an account. EXIT_CODE=0"
         },
         {
-          "action": "Run node codex-quota.js factory list --json (live CLI, no accounts)",
+          "action": "Run node shuvquota.js factory list --json (live CLI, no accounts)",
           "expected": "JSON with empty accounts array",
           "observed": "{\"accounts\":[],\"activeLabel\":null} EXIT_CODE=0"
         }

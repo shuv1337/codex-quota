@@ -13,7 +13,7 @@
 
 The source and final implementation were opened together in one original-resolution comparison input at the same 1487 x 1058 viewport. The final implementation preserves the source's graphite command-center composition, 180 px brand rail, devil-phone focal mark, condensed Quota Runway hierarchy, right-aligned scan controls, ruled provider table, semantic runway colors, and dense one-row-per-provider rhythm. The header/table boundary and three provider rows now occupy the same major vertical regions as the source, with the footer visible at the bottom of the frame.
 
-Dynamic values intentionally differ because the implementation uses live codex-quota data rather than the source mock. The final column intentionally reports real limit/window information instead of inventing a seven-day trend before enough in-session history exists. Official provider assets replace the source mock's illustrative provider marks.
+Dynamic values intentionally differ because the implementation uses live shuvquota data rather than the source mock. The final column intentionally reports real limit/window information instead of inventing a seven-day trend before enough in-session history exists. Official provider assets replace the source mock's illustrative provider marks.
 
 ## Focused region comparison evidence
 

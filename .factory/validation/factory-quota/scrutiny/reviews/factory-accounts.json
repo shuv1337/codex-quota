@@ -6,7 +6,7 @@
   "diffReviewed": true,
   "status": "pass",
   "codeReview": {
-    "summary": "lib/factory-accounts.js correctly implements all 9 required functions following the codex-accounts.js pattern. The module properly loads Factory accounts from three sources (env var, container file, auth.v2 fallback) with priority ordering and deduplication by accountId. JWT profile extraction handles WorkOS-specific claims (email, org_id, sub, first_name+last_name). All functions have proper JSDoc documentation, error handling (returning empty arrays on failure), and use the established section divider convention. Barrel re-exports are correctly added to codex-quota.js. Tests are comprehensive (51 tests) covering happy paths, error cases (missing files, malformed JSON, empty env, corrupt auth, missing JWT claims), deduplication, and edge cases.",
+    "summary": "lib/factory-accounts.js correctly implements all 9 required functions following the codex-accounts.js pattern. The module properly loads Factory accounts from three sources (env var, container file, auth.v2 fallback) with priority ordering and deduplication by accountId. JWT profile extraction handles WorkOS-specific claims (email, org_id, sub, first_name+last_name). All functions have proper JSDoc documentation, error handling (returning empty arrays on failure), and use the established section divider convention. Barrel re-exports are correctly added to shuvquota.js. Tests are comprehensive (51 tests) covering happy paths, error cases (missing files, malformed JSON, empty env, corrupt auth, missing JWT claims), deduplication, and edge cases.",
     "issues": [
       {
         "file": "lib/factory-accounts.js",

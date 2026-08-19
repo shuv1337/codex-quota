@@ -2,7 +2,7 @@
   "groupId": "auth-security",
   "testedAt": "2026-03-13T00:00:00.000Z",
   "isolation": {
-    "workingDirectory": "/home/shuv/repos/codex-quota",
+    "workingDirectory": "/home/shuv/repos/shuvquota",
     "testMethod": "bun test --grep with mocked data (no real Factory accounts configured)",
     "apiAccess": "Factory Analytics API returns 403 — all API tests use mocked fetch"
   },

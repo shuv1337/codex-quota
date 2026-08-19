@@ -2,9 +2,9 @@ version = 1
 
 [[apps]]
 name = "shuvquota"
-command = "node shuvquota.js"
-cwd = "/home/shuv/repos/codex-quota"
-namespace = "codex-quota"
+command = "node shuvquota-server.js"
+cwd = "/home/shuv/repos/shuvquota"
+namespace = "shuvquota"
 restart_policy = "always"
 max_restarts = 20
 crash_restart_limit = 5

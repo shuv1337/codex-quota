@@ -1,32 +1,32 @@
 {
-  "name": "codex-quota",
+  "name": "shuvquota",
   "version": "1.1.25",
-  "description": "Multi-account manager for OpenAI Codex CLI and OpenCode with OAuth browser authentication",
+  "description": "Multi-provider quota monitor and account manager for AI coding services",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/shuv1337/codex-quota.git"
+    "url": "git+https://github.com/shuv1337/shuvquota.git"
   },
-  "homepage": "https://github.com/shuv1337/codex-quota#readme",
+  "homepage": "https://github.com/shuv1337/shuvquota#readme",
   "bugs": {
-    "url": "https://github.com/shuv1337/codex-quota/issues"
+    "url": "https://github.com/shuv1337/shuvquota/issues"
   },
   "files": [
-    "codex-quota.js",
     "shuvquota.js",
+    "shuvquota-server.js",
     "lib/",
     "web/",
     "README.md",
     "LICENSE"
   ],
   "bin": {
-    "cq": "./codex-quota.js",
-    "codex-quota": "./codex-quota.js",
-    "shuvquota": "./shuvquota.js"
+    "cq": "./shuvquota.js",
+    "shuvquota": "./shuvquota.js",
+    "shuvquota-server": "./shuvquota-server.js"
   },
   "scripts": {
-    "start": "node codex-quota.js",
-    "app": "node shuvquota.js",
+    "start": "node shuvquota.js",
+    "app": "node shuvquota-server.js",
     "test": "bun test",
     "preflight": "node scripts/preflight.js",
     "release:patch": "bun pm version patch",

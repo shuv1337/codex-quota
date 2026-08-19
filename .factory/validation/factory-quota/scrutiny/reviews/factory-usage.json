@@ -6,7 +6,7 @@
   "diffReviewed": true,
   "status": "pass",
   "codeReview": {
-    "summary": "Clean, well-structured implementation of lib/factory-usage.js with four exported functions (computeBillingPeriod, sumDailyTokens, extractModelBreakdown, fetchFactoryUsage). Follows the parallel module pattern established by codex-usage.js and claude-usage.js. All feature requirements met: correct API URL construction with date params, JWT-preferred auth with apiKey fallback, AbortController timeout, structured return format, billing period edge case handling, and input validation. 49 tests added covering all specified scenarios. Barrel re-exports properly added to codex-quota.js.",
+    "summary": "Clean, well-structured implementation of lib/factory-usage.js with four exported functions (computeBillingPeriod, sumDailyTokens, extractModelBreakdown, fetchFactoryUsage). Follows the parallel module pattern established by codex-usage.js and claude-usage.js. All feature requirements met: correct API URL construction with date params, JWT-preferred auth with apiKey fallback, AbortController timeout, structured return format, billing period edge case handling, and input validation. 49 tests added covering all specified scenarios. Barrel re-exports properly added to shuvquota.js.",
     "issues": [
       {
         "file": "lib/factory-usage.js",

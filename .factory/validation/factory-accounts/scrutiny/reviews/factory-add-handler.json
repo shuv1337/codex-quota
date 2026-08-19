@@ -37,7 +37,7 @@
     {
       "area": "conventions",
       "observation": "The process.exit mock pattern using `process.exit = (code) => { throw new Error('EXIT_' + code); }` combined with `if (error.message?.startsWith('EXIT_')) throw error;` in catch blocks is used across all handler tests but not documented in project AGENTS.md or mission AGENTS.md. Workers have to discover this pattern by reading existing tests.",
-      "evidence": "codex-quota.test.js handleFactoryAdd tests use this pattern in beforeEach/afterEach; same pattern used in handleAdd, handleClaudeAdd, handleFactorySwitch, handleFactoryRemove test blocks."
+      "evidence": "shuvquota.test.js handleFactoryAdd tests use this pattern in beforeEach/afterEach; same pattern used in handleAdd, handleClaudeAdd, handleFactorySwitch, handleFactoryRemove test blocks."
     }
   ],
   "addressesFailureFrom": null,

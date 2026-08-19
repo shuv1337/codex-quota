@@ -9,7 +9,7 @@ Testing surface, validation approach, and resource cost classification.
 
 ## Validation Surface
 - **Surface type:** Terminal CLI
-- **Tool:** Direct CLI execution (`node codex-quota.js ...`)
+- **Tool:** Direct CLI execution (`node shuvquota.js ...`)
 - **What to check:** stdout content, stderr content, exit codes, file state (container files, auth.v2 files)
 
 ## Testing Approach
@@ -23,14 +23,14 @@ Testing surface, validation approach, and resource cost classification.
 
 ## CLI Commands to Test
 ```
-node codex-quota.js                          # default view (all providers)
-node codex-quota.js factory quota            # Factory-only quota
-node codex-quota.js factory quota --json     # JSON output
-node codex-quota.js factory quota --billing-day 15  # Custom billing
-node codex-quota.js factory list             # List accounts
-node codex-quota.js factory add              # Add account flow
-node codex-quota.js factory switch <label>   # Switch active account
-node codex-quota.js factory remove <label>   # Remove account
+node shuvquota.js                          # default view (all providers)
+node shuvquota.js factory quota            # Factory-only quota
+node shuvquota.js factory quota --json     # JSON output
+node shuvquota.js factory quota --billing-day 15  # Custom billing
+node shuvquota.js factory list             # List accounts
+node shuvquota.js factory add              # Add account flow
+node shuvquota.js factory switch <label>   # Switch active account
+node shuvquota.js factory remove <label>   # Remove account
 ```
 
 ## Flow Validator Guidance: Terminal CLI
@@ -38,7 +38,7 @@ node codex-quota.js factory remove <label>   # Remove account
 ### Testing Method
 Each flow validator verifies assertions by:
 1. **Running targeted unit tests** via `bun test --grep "<pattern>"` to check function-level correctness
-2. **Running CLI commands** via `node codex-quota.js <args>` and checking stdout/stderr/exit code
+2. **Running CLI commands** via `node shuvquota.js <args>` and checking stdout/stderr/exit code
 3. **Inspecting source code** to verify implementation details (imports, patterns, conventions)
 
 ### Isolation Rules
@@ -48,7 +48,7 @@ Each flow validator verifies assertions by:
 - The Factory Analytics API is not enabled (returns 403) — this is expected and documented
 
 ### Key Test Patterns
-- Tests import from `./codex-quota.js` (barrel re-exports)
+- Tests import from `./shuvquota.js` (barrel re-exports)
 - Test groups are organized by `describe()` blocks with descriptive names
 - Use `bun test --grep "<describe-name>"` to run specific groups
 - 5 pre-existing test failures on `startCallbackServer` (port 1455 in use) — these are NOT related to Factory features

@@ -6,7 +6,7 @@
   "diffReviewed": true,
   "status": "pass",
   "codeReview": {
-    "summary": "The handleFactorySwitch implementation is well-structured and correctly follows all existing patterns from handleFactoryAdd. The flow matches the feature description exactly: reads container, finds account by label, validates auth data presence, decrypts stored auth, writes via writeAuthV2Files (atomic, fresh key), updates activeLabel, and confirms with account details. JSON output mode is fully supported. Error handling is comprehensive with distinct paths for missing label, missing container, non-existent label (with available labels list), missing auth data, decryption failure, and write failure. The implementation correctly re-throws EXIT_ errors from process.exit mocking. The 12 tests provide thorough coverage including happy path, JSON output, error cases, roundtrip overwrite verification (A→B→A), file permission checks (0o600 for files, 0o700 for directory), container permission check, routing through handleFactory dispatcher, and edge cases (no container, missing auth data). The help text in display.js was also updated with the switch command. The barrel re-export was correctly added to codex-quota.js.",
+    "summary": "The handleFactorySwitch implementation is well-structured and correctly follows all existing patterns from handleFactoryAdd. The flow matches the feature description exactly: reads container, finds account by label, validates auth data presence, decrypts stored auth, writes via writeAuthV2Files (atomic, fresh key), updates activeLabel, and confirms with account details. JSON output mode is fully supported. Error handling is comprehensive with distinct paths for missing label, missing container, non-existent label (with available labels list), missing auth data, decryption failure, and write failure. The implementation correctly re-throws EXIT_ errors from process.exit mocking. The 12 tests provide thorough coverage including happy path, JSON output, error cases, roundtrip overwrite verification (A→B→A), file permission checks (0o600 for files, 0o700 for directory), container permission check, routing through handleFactory dispatcher, and edge cases (no container, missing auth data). The help text in display.js was also updated with the switch command. The barrel re-export was correctly added to shuvquota.js.",
     "issues": [
       {
         "file": "lib/handlers.js",
@@ -26,7 +26,7 @@
     {
       "area": "conventions",
       "observation": "The worker correctly followed the TDD skill procedure but did not strictly write tests first (RED phase). The transcript shows the implementation was written before tests, then tests were added after. The skill says 'Write Tests First (RED)' but the worker wrote implementation first. However, since all tests pass and the implementation is correct, this is a minor procedural deviation with no quality impact.",
-      "evidence": "Transcript skeleton shows: Step 'Write Tests First' was done after 'Implement handleFactorySwitch' — Edit calls to handlers.js appear before Edit calls adding test describe block to codex-quota.test.js"
+      "evidence": "Transcript skeleton shows: Step 'Write Tests First' was done after 'Implement handleFactorySwitch' — Edit calls to handlers.js appear before Edit calls adding test describe block to shuvquota.test.js"
     },
     {
       "area": "conventions",

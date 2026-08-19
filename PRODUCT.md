@@ -12,7 +12,7 @@ without interrupting their current workflow.
 
 ## Product Purpose
 
-Codex Quota provides one dependable CLI for account management, credential synchronization,
+Shuvquota provides one dependable CLI for account management, credential synchronization,
 and quota monitoring across supported AI providers. Success means current account and quota
 state is fast to scan, safe to act on, and equally usable in wide terminals, narrow panes,
 scripts, and no-color environments.

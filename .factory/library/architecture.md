@@ -22,15 +22,15 @@ Shared modules used by all providers:
 - `handlers.js` — CLI subcommand dispatchers
 
 ## Entry Point Pattern
-`codex-quota.js` is a thin shell:
+`shuvquota.js` is a thin shell:
 1. Imports from `lib/` modules
 2. `main()` — CLI arg parsing + routing to handlers
 3. `isMain` guard — only runs when executed directly
-4. **Barrel re-exports** — re-exports every symbol from `lib/` so tests and consumers import from `./codex-quota.js`
+4. **Barrel re-exports** — re-exports every symbol from `lib/` so tests and consumers import from `./shuvquota.js`
 
 **CRITICAL:** Any new export must be added in TWO places:
 1. The `lib/*.js` module where the function lives
-2. The barrel re-export block at the bottom of `codex-quota.js`
+2. The barrel re-export block at the bottom of `shuvquota.js`
 
 ## CLI Routing
 - First non-flag arg is checked for namespace (`"codex"`, `"claude"`, `"factory"`)

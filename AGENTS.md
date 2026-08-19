@@ -4,7 +4,7 @@ Guidelines for AI coding agents working in this repository.
 
 ## Project Overview
 
-`codex-quota` is a zero-dependency Node.js CLI for managing multiple OpenAI Codex, Claude, Factory.ai, SuperGrok (xAI OAuth), Synthetic, and Google AI Pro / Antigravity credentials. Provides account management (add, switch, remove, list, sync) and quota checking using only Node.js built-in modules.
+`shuvquota` is a zero-dependency Node.js CLI for managing multiple OpenAI Codex, Claude, Factory.ai, SuperGrok (xAI OAuth), Synthetic, and Google AI Pro / Antigravity credentials. Provides account management (add, switch, remove, list, sync) and quota checking using only Node.js built-in modules.
 
 ## Tech Stack
 
@@ -18,14 +18,14 @@ Guidelines for AI coding agents working in this repository.
 
 ```bash
 # Run the CLI
-node codex-quota.js
+node shuvquota.js
 bun run start
 
 # Run all tests
 bun test
 
 # Run a single test file
-bun test codex-quota.test.js
+bun test shuvquota.test.js
 
 # Run tests matching a pattern
 bun test --grep "isValidAccount"
@@ -47,9 +47,9 @@ bun run release:pack
 ## Project Structure
 
 ```
-codex-quota/
-├── codex-quota.js            # Entry point: main(), CLI routing, barrel re-exports
-├── codex-quota.test.js       # Main test suite (imports via barrel re-exports)
+shuvquota/
+├── shuvquota.js            # Entry point: main(), CLI routing, barrel re-exports
+├── shuvquota.test.js       # Main test suite (imports via barrel re-exports)
 ├── grok.test.js              # SuperGrok / Grok OAuth quota tests
 ├── synthetic.test.js         # Synthetic API quota tests
 ├── lib/
@@ -96,7 +96,7 @@ codex-quota/
 ### Dependency Graph (no circular dependencies)
 
 ```
-codex-quota.js (entry)
+shuvquota.js (entry)
   ├── lib/constants.js          (leaf — Node.js built-ins only)
   ├── lib/color.js              ← constants
   ├── lib/jwt.js                ← constants
@@ -134,11 +134,11 @@ codex-quota.js (entry)
 
 ### Entry Point Pattern
 
-`codex-quota.js` is a thin shell (~260 lines):
+`shuvquota.js` is a thin shell (~260 lines):
 1. Imports from `lib/` modules
 2. `main()` function — CLI arg parsing + routing to handlers
 3. `isMain` guard — only runs `main()` when executed directly
-4. **Barrel re-exports** — re-exports every symbol from `lib/` so that test imports and external consumers continue to work via `import { ... } from "./codex-quota.js"`
+4. **Barrel re-exports** — re-exports every symbol from `lib/` so that test imports and external consumers continue to work via `import { ... } from "./shuvquota.js"`
 
 ### Where to Add New Code
 
@@ -158,7 +158,7 @@ codex-quota.js (entry)
 | New Antigravity loader | `lib/antigravity-accounts.js` |
 | Antigravity Cloud Code quota | `lib/antigravity-usage.js` |
 | Sync/divergence logic | `lib/sync.js` |
-| **New export for tests** | Add to the relevant `lib/*.js` module AND add a barrel re-export in `codex-quota.js` |
+| **New export for tests** | Add to the relevant `lib/*.js` module AND add a barrel re-export in `shuvquota.js` |
 
 ### Token Match Generics
 
@@ -193,7 +193,7 @@ The `"files"` array **must** include `"lib/"` for the npm package to work. The p
 
 ### Section Dividers
 
-Separate major sections with ASCII art (used in `codex-quota.js` entry point and larger modules):
+Separate major sections with ASCII art (used in `shuvquota.js` entry point and larger modules):
 ```javascript
 // ─────────────────────────────────────────────────────────────────────────────
 // Section Name
@@ -284,7 +284,7 @@ describe("functionName", () => {
 
 ### Test Imports
 
-Tests import from `./codex-quota.js` (the barrel re-exports), not directly from `lib/`:
+Tests import from `./shuvquota.js` (the barrel re-exports), not directly from `lib/`:
 ```javascript
 import {
 	loadAccountsFromEnv,
@@ -292,12 +292,12 @@ import {
 	decodeJWT,
 	extractAccountId,
 	// ...
-} from "./codex-quota.js";
+} from "./shuvquota.js";
 ```
 
 This means any new export must be added in two places:
 1. The `lib/*.js` module where the function lives
-2. The barrel re-export block at the bottom of `codex-quota.js`
+2. The barrel re-export block at the bottom of `shuvquota.js`
 
 ### Test Naming
 
@@ -342,4 +342,4 @@ As of latest: **686 tests** across the repository test files. All tests must pas
 - Quota-only: no add/switch/remove. Reads `ANTIGRAVITY_REFRESH` / `ANTIGRAVITY_ACCOUNTS`, `~/.local/share/opencode/antigravity-accounts.json`, and shuvcode `google` OAuth (`methodID=google-ai-pro`) from `opencode.db` / `opencode-local.db`.
 - Quota endpoint: `POST https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` with `{ project }`. Gemini 5h + weekly, plus unused Claude/GPT buckets.
 - **No refresh writeback.** Google does not rotate this refresh token. Refresh stays in memory so we do not race shuvcode's stored credential.
-- OAuth client id/secret are not in-tree. Set `ANTIGRAVITY_CLIENT_ID` and `ANTIGRAVITY_CLIENT_SECRET` in `~/.codex-quota.env`.
+- OAuth client id/secret are not in-tree. Set `ANTIGRAVITY_CLIENT_ID` and `ANTIGRAVITY_CLIENT_SECRET` in `~/.shuvquota.env`.

@@ -2,7 +2,7 @@
   "groupId": "quota-display",
   "testedAt": "2026-03-13T07:00:00.000Z",
   "isolation": {
-    "workingDirectory": "/home/shuv/repos/codex-quota",
+    "workingDirectory": "/home/shuv/repos/shuvquota",
     "notes": "No Factory accounts configured in real environment. All API interactions tested via mocked unit tests. Factory Analytics API returns 403 (expected)."
   },
   "toolsUsed": ["bun test", "node CLI execution"],
@@ -23,7 +23,7 @@
           "observed": "17/17 buildFactoryUsageLines tests pass — confirms box contains header with label/email/org, monthly token usage bar (used/limit), per-model breakdown, billing period dates, and source path"
         },
         {
-          "action": "Run CLI: node codex-quota.js factory quota (no accounts configured)",
+          "action": "Run CLI: node shuvquota.js factory quota (no accounts configured)",
           "expected": "Without accounts, shows 'no accounts' error (cannot test real display without configured account)",
           "observed": "Shows 'No Factory accounts found' with searched locations and guidance. Exit code 1. Real display path verified via unit tests with mocked API."
         }
@@ -42,12 +42,12 @@
       "status": "pass",
       "steps": [
         {
-          "action": "Run CLI: node codex-quota.js --json",
+          "action": "Run CLI: node shuvquota.js --json",
           "expected": "JSON output includes 'factory' key alongside 'codex' and 'claude'",
           "observed": "JSON output contains 'codex': [...], 'claude': [...], 'factory': [] — Factory key is present alongside others. Exit code 0."
         },
         {
-          "action": "Run CLI: node codex-quota.js (default, no args)",
+          "action": "Run CLI: node shuvquota.js (default, no args)",
           "expected": "Default view renders Codex, Claude, and Factory sections",
           "observed": "Renders Codex boxes (4 accounts) and Claude box (1 account). Factory section silently omitted because no Factory accounts configured (correct behavior per handleQuota scope='all' tests)."
         },
@@ -95,12 +95,12 @@
       "status": "pass",
       "steps": [
         {
-          "action": "Run CLI: node codex-quota.js factory quota --json",
+          "action": "Run CLI: node shuvquota.js factory quota --json",
           "expected": "Valid JSON with error fields (since no accounts configured)",
           "observed": "Output: {\"success\":false,\"error\":\"No Factory accounts found\",\"searchedLocations\":[...]}. Valid JSON, parseable, exit code 1."
         },
         {
-          "action": "Run CLI: node codex-quota.js --json",
+          "action": "Run CLI: node shuvquota.js --json",
           "expected": "JSON includes 'factory' key alongside 'codex' and 'claude'",
           "observed": "Valid JSON with 'codex', 'claude', 'factory', and 'divergence' keys. factory is empty array []. Exit code 0."
         },
@@ -129,9 +129,9 @@
       "status": "pass",
       "steps": [
         {
-          "action": "Run CLI: node codex-quota.js factory quota",
+          "action": "Run CLI: node shuvquota.js factory quota",
           "expected": "Helpful message with searched paths, suggests 'cq factory add', exit code 1",
-          "observed": "Output: 'No Factory accounts found.\\nSearched:\\n  - FACTORY_ACCOUNTS env var\\n  - ~/.factory-accounts.json\\n  - ~/.factory/auth.v2.file\\nRun codex-quota factory add to add an account.' Exit code 1."
+          "observed": "Output: 'No Factory accounts found.\\nSearched:\\n  - FACTORY_ACCOUNTS env var\\n  - ~/.factory-accounts.json\\n  - ~/.factory/auth.v2.file\\nRun shuvquota factory add to add an account.' Exit code 1."
         },
         {
           "action": "Run unit test: bun test --grep 'handleFactoryQuota'",
@@ -168,7 +168,7 @@
           "observed": "4/4 tests pass. Replaces home dir with ~, handles nested paths, returns original for non-home paths."
         },
         {
-          "action": "Run CLI: node codex-quota.js --no-color factory quota",
+          "action": "Run CLI: node shuvquota.js --no-color factory quota",
           "expected": "Output has no ANSI escape codes",
           "observed": "Output is plain text with no ANSI codes. Shows 'No Factory accounts found' message. Exit code 1."
         }
@@ -187,17 +187,17 @@
       "status": "pass",
       "steps": [
         {
-          "action": "Run CLI: node codex-quota.js factory",
+          "action": "Run CLI: node shuvquota.js factory",
           "expected": "Prints Factory-specific help listing available subcommands",
-          "observed": "Output: 'codex-quota factory - Manage Factory.ai accounts\\nUsage: codex-quota factory [command] [options]\\nCommands: quota [label]...' with examples. Exit code 0."
+          "observed": "Output: 'shuvquota factory - Manage Factory.ai accounts\\nUsage: shuvquota factory [command] [options]\\nCommands: quota [label]...' with examples. Exit code 0."
         },
         {
-          "action": "Run CLI: node codex-quota.js factory unknowncmd",
+          "action": "Run CLI: node shuvquota.js factory unknowncmd",
           "expected": "Prints error and help",
           "observed": "Output: 'Unknown Factory command: unknowncmd' followed by full Factory help text. Exit code 1."
         },
         {
-          "action": "Run CLI: node codex-quota.js factory quota",
+          "action": "Run CLI: node shuvquota.js factory quota",
           "expected": "Routes correctly to Factory-only display",
           "observed": "Routes to Factory quota handler, shows 'No Factory accounts found' (correct since no accounts configured). Exit code 1."
         },
@@ -226,9 +226,9 @@
       "status": "pass",
       "steps": [
         {
-          "action": "Run CLI: node codex-quota.js --help",
+          "action": "Run CLI: node shuvquota.js --help",
           "expected": "Help text lists 'factory' as available namespace alongside 'codex' and 'claude'",
-          "observed": "Help text includes 'Namespaces: codex (Manage OpenAI Codex accounts), claude (Manage Claude accounts), factory (Manage Factory.ai accounts)'. Examples include 'codex-quota factory' and 'codex-quota factory quota'. Exit code 0."
+          "observed": "Help text includes 'Namespaces: codex (Manage OpenAI Codex accounts), claude (Manage Claude accounts), factory (Manage Factory.ai accounts)'. Examples include 'shuvquota factory' and 'shuvquota factory quota'. Exit code 0."
         },
         {
           "action": "Run unit test: bun test --grep 'printHelp includes Factory'",

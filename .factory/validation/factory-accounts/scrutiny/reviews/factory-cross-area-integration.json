@@ -6,22 +6,22 @@
   "diffReviewed": true,
   "status": "pass",
   "codeReview": {
-    "summary": "The implementation adds 18 well-structured integration tests (730 lines) to codex-quota.test.js covering all required cross-area flows. Tests are organized into 7 describe blocks: Add→quota (VAL-CROSS-001), Switch→quota (VAL-CROSS-002), Remove→quota (VAL-CROSS-004), default view without Factory (VAL-CROSS-003), Codex/Claude routing unchanged (VAL-CROSS-006/007), and barrel re-export completeness. All tests follow project conventions: imports from barrel (./codex-quota.js), proper beforeEach/afterEach cleanup of console, process.exit, env vars, and globalThis.fetch, temp directories via os.tmpdir(), and tab indentation. The test quality is high — each test exercises a real handler (handleFactoryAdd, handleFactorySwitch, handleFactoryRemove, handleFactoryQuota, handleQuota) with proper mocking of dependencies. The roundtrip switch test (A→B→A) is a particularly good edge case. The barrel re-export tests systematically verify every export from all 4 factory modules plus related constants/handlers/display. One minor note: the Codex routing test was initially off (expected parsed.length === 1 but got 5 from local accounts) and was fixed mid-session to use .find() + .toBeGreaterThanOrEqual(1), which is more robust. All 535 tests pass with 1326 expect() calls. All verification steps passed (bun test, CLI default view, codex quota, claude quota, preflight).",
+    "summary": "The implementation adds 18 well-structured integration tests (730 lines) to shuvquota.test.js covering all required cross-area flows. Tests are organized into 7 describe blocks: Add→quota (VAL-CROSS-001), Switch→quota (VAL-CROSS-002), Remove→quota (VAL-CROSS-004), default view without Factory (VAL-CROSS-003), Codex/Claude routing unchanged (VAL-CROSS-006/007), and barrel re-export completeness. All tests follow project conventions: imports from barrel (./shuvquota.js), proper beforeEach/afterEach cleanup of console, process.exit, env vars, and globalThis.fetch, temp directories via os.tmpdir(), and tab indentation. The test quality is high — each test exercises a real handler (handleFactoryAdd, handleFactorySwitch, handleFactoryRemove, handleFactoryQuota, handleQuota) with proper mocking of dependencies. The roundtrip switch test (A→B→A) is a particularly good edge case. The barrel re-export tests systematically verify every export from all 4 factory modules plus related constants/handlers/display. One minor note: the Codex routing test was initially off (expected parsed.length === 1 but got 5 from local accounts) and was fixed mid-session to use .find() + .toBeGreaterThanOrEqual(1), which is more robust. All 535 tests pass with 1326 expect() calls. All verification steps passed (bun test, CLI default view, codex quota, claude quota, preflight).",
     "issues": [
       {
-        "file": "codex-quota.test.js",
+        "file": "shuvquota.test.js",
         "line": 9381,
         "severity": "non_blocking",
         "description": "The 'removed account no longer shown by handleFactoryQuota' test verifies removal via handleFactoryRemove on the container file, but then sets up a separate FACTORY_ACCOUNTS env var with only the surviving account to test quota display. This means the quota test doesn't read from the same container file that was modified — it reads from the env var. The test still validates the correct behavior (quota shows only surviving accounts), but the coupling between remove and quota is indirect rather than truly end-to-end through the file system."
       },
       {
-        "file": "codex-quota.test.js",
+        "file": "shuvquota.test.js",
         "line": 9155,
         "severity": "non_blocking",
         "description": "The 'newly added account is displayed by handleFactoryQuota' test similarly bridges add→quota by reading the container after add, then manually constructing a FACTORY_ACCOUNTS env var for the quota check. This is pragmatic (avoids depending on loadAllFactoryAccounts reading the exact test path), but means the test is more of a 'unit-integration' hybrid than a pure end-to-end flow."
       },
       {
-        "file": "codex-quota.test.js",
+        "file": "shuvquota.test.js",
         "line": 9098,
         "severity": "non_blocking",
         "description": "Repeated boilerplate across describe blocks: consoleOutput/consoleErrors capture, console.log/error mocking, process.exit mocking, fetch mocking, and env var save/restore. A shared test helper or fixture would reduce ~150 lines of duplication. Not a correctness issue — just maintainability."

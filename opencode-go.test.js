@@ -16,7 +16,7 @@ import {
 	buildOpenCodeGoJsonOutput,
 	OPENCODE_GO_DASHBOARD_BASE_URL,
 	OPENCODE_GO_TIMEOUT_MS,
-} from "./codex-quota.js";
+} from "./shuvquota.js";
 
 const NOW_MS = Date.parse("2026-07-21T12:00:00.000Z");
 const SENTINEL_COOKIE = "SENTINEL_COOKIE_MUST_NEVER_LEAK";
@@ -114,7 +114,7 @@ describe("resolveOpenCodeGoDashboardConfig", () => {
 describe("getOpenCodeGoSearchLocations", () => {
 	test("lists both required environment variables", () => {
 		const locations = getOpenCodeGoSearchLocations();
-		expect(locations.some(location => location.includes("~/.codex-quota.env"))).toBe(true);
+		expect(locations.some(location => location.includes("~/.shuvquota.env"))).toBe(true);
 		expect(locations).toContain("OPENCODE_GO_WORKSPACE_ID env var");
 		expect(locations).toContain("OPENCODE_GO_AUTH_COOKIE env var");
 	});
@@ -537,14 +537,14 @@ describe("OpenCode Go display and CLI routing", () => {
 			env.OPENCODE_GO_WORKSPACE_ID = "";
 			env.OPENCODE_GO_AUTH_COOKIE = "";
 			env.OPENCODE_GO_LABEL = "";
-			const result = spawnSync(process.execPath, ["codex-quota.js", ...args, "--no-color"], {
+			const result = spawnSync(process.execPath, ["shuvquota.js", ...args, "--no-color"], {
 				cwd: process.cwd(),
 				env,
 				encoding: "utf8",
 			});
 			expect(result.status).toBe(0);
 			expect(result.stderr).toBe("");
-			expect(result.stdout).toContain("codex-quota opencode-go");
+			expect(result.stdout).toContain("shuvquota opencode-go");
 			expect(result.stdout).not.toContain(SENTINEL_COOKIE);
 		});
 	}

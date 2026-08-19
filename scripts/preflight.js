@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Release preflight checks for codex-quota
+ * Release preflight checks for shuvquota
  * 
  * Validates package.json metadata and git state before publishing.
  * Run with: node scripts/preflight.js
@@ -20,10 +20,10 @@ const ROOT = join(__dirname, "..");
 // Configuration
 // ─────────────────────────────────────────────────────────────────────────────
 
-const EXPECTED_NAME = "codex-quota";
+const EXPECTED_NAME = "shuvquota";
 const REQUIRED_FILES = [
-	"codex-quota.js",
 	"shuvquota.js",
+	"shuvquota-server.js",
 	"lib/",
 	"web/",
 	"README.md",
@@ -158,7 +158,7 @@ function buildChecks(pkg, { skipGit = false } = {}) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function main() {
-	console.log("Preflight checks for codex-quota release\n");
+	console.log("Preflight checks for shuvquota release\n");
 	
 	// Load package.json
 	let pkg;

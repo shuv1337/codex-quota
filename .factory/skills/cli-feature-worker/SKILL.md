@@ -1,6 +1,6 @@
 ---
 name: cli-feature-worker
-description: Implements Node.js CLI features with TDD for the codex-quota project
+description: Implements Node.js CLI features with TDD for the shuvquota project
 ---
 
 # CLI Feature Worker
@@ -9,7 +9,7 @@ NOTE: Startup and cleanup are handled by `worker-base`. This skill defines the W
 
 ## When to Use This Skill
 
-Use for any feature that involves creating or modifying `lib/*.js` modules, updating `codex-quota.js` (routing, barrel re-exports), adding tests to `codex-quota.test.js`, or modifying `lib/display.js` / `lib/handlers.js` / `lib/constants.js`.
+Use for any feature that involves creating or modifying `lib/*.js` modules, updating `shuvquota.js` (routing, barrel re-exports), adding tests to `shuvquota.test.js`, or modifying `lib/display.js` / `lib/handlers.js` / `lib/constants.js`.
 
 ## Work Procedure
 
@@ -26,14 +26,14 @@ Before writing any code, read the existing parallel modules to understand patter
 - For handlers: read `lib/handlers.js` (look at `handleCodex`/`handleClaude` switch statements)
 - For display: read `lib/display.js` (look at `buildAccountUsageLines`/`buildClaudeUsageLines`)
 - For constants: read `lib/constants.js` for naming conventions
-- For tests: read `codex-quota.test.js` for test patterns, mock helpers, cleanup patterns
+- For tests: read `shuvquota.test.js` for test patterns, mock helpers, cleanup patterns
 
 Match the existing patterns exactly. Do not invent new patterns.
 
 ### Step 3: Write Tests First (RED)
 
-Add test cases to `codex-quota.test.js` (or the appropriate test file) BEFORE writing implementation:
-- Import from `./codex-quota.js` (barrel re-exports), NOT from `lib/` directly
+Add test cases to `shuvquota.test.js` (or the appropriate test file) BEFORE writing implementation:
+- Import from `./shuvquota.js` (barrel re-exports), NOT from `lib/` directly
 - Use `describe`/`test`/`expect` structure
 - Add `beforeEach`/`afterEach` for environment cleanup
 - Use `os.tmpdir()` for temp files
@@ -48,7 +48,7 @@ Write the implementation in `lib/*.js` modules:
 - Follow existing module patterns exactly (imports, error handling, JSDoc, section dividers)
 - Use tabs for indentation, double quotes, semicolons
 - Use `node:` prefix for Node.js built-in imports
-- Add barrel re-exports to `codex-quota.js` for ALL new exports
+- Add barrel re-exports to `shuvquota.js` for ALL new exports
 - If modifying `handlers.js`, add routing in the correct switch statement
 - If modifying `constants.js`, follow UPPER_SNAKE_CASE naming
 - If adding display functions, use existing `drawBox`, `printBar`, `shortenPath` helpers
@@ -58,7 +58,7 @@ Run `bun test` to confirm all tests PASS (both new and existing).
 ### Step 5: Verify
 
 1. Run `bun test` — ALL tests must pass (existing + new), zero failures
-2. Run `node codex-quota.js` to verify the CLI still works for existing providers
+2. Run `node shuvquota.js` to verify the CLI still works for existing providers
 3. If the feature adds CLI commands, run them manually and verify output
 4. Run `node scripts/preflight.js` to verify package integrity
 5. Check that no sensitive data (API keys, JWTs, encryption keys) appears in any output
@@ -77,8 +77,8 @@ Commit with a descriptive message following the project's commit style (see `git
   "verification": {
     "commandsRun": [
       { "command": "bun test", "exitCode": 0, "observation": "224 tests passed, 0 failed" },
-      { "command": "node codex-quota.js factory quota --json", "exitCode": 0, "observation": "Outputs valid JSON with Factory usage data structure" },
-      { "command": "node codex-quota.js", "exitCode": 0, "observation": "Default view shows Codex, Claude, and Factory sections" },
+      { "command": "node shuvquota.js factory quota --json", "exitCode": 0, "observation": "Outputs valid JSON with Factory usage data structure" },
+      { "command": "node shuvquota.js", "exitCode": 0, "observation": "Default view shows Codex, Claude, and Factory sections" },
       { "command": "node scripts/preflight.js", "exitCode": 0, "observation": "All preflight checks pass, lib/ included in files array" }
     ],
     "interactiveChecks": [
@@ -90,7 +90,7 @@ Commit with a descriptive message following the project's commit style (see `git
   "tests": {
     "added": [
       {
-        "file": "codex-quota.test.js",
+        "file": "shuvquota.test.js",
         "cases": [
           { "name": "fetchFactoryUsage returns parsed usage data", "verifies": "Happy path API call" },
           { "name": "fetchFactoryUsage falls back to API key", "verifies": "JWT unavailable, uses fk- key" },

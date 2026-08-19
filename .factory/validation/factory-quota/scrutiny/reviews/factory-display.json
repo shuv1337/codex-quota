@@ -15,7 +15,7 @@
         "description": "The 'flags' parameter is accepted but never referenced in the function body. The --no-color behavior works via the global setNoColorFlag mechanism (in color.js), not through this parameter. The existing buildAccountUsageLines and buildClaudeUsageLines functions do not take a flags parameter. This is a minor inconsistency with the existing pattern and dead code, though it could serve as a future extension point."
       },
       {
-        "file": "codex-quota.test.js",
+        "file": "shuvquota.test.js",
         "line": 6192,
         "severity": "non_blocking",
         "description": "The 'respects --no-color flag' test is vacuously true — buildFactoryUsageLines never produces ANSI escape codes regardless of the noColor flag (printBar uses unicode chars ████░░░░, not ANSI colors). The test passes because there are no ANSI codes to find, not because the function actively strips them. This is consistent with existing display builders (which also don't embed ANSI codes), but the test gives a false sense of coverage for the no-color feature."

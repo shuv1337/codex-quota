@@ -49,7 +49,7 @@ import {
 	QUOTA_BOX_MAX_WIDTH,
 	formatQuotaBarLine,
 	QUOTA_LABEL_WIDTH,
-} from "./codex-quota.js";
+} from "./shuvquota.js";
 
 function makeGrokJwt(claims = {}) {
 	const header = Buffer.from(JSON.stringify({ alg: "ES256", typ: "JWT" })).toString("base64url");
@@ -171,10 +171,44 @@ describe("normalizeGrokCreditsBilling", () => {
 		expect(normalizeGrokCreditsBilling({})).toBeNull();
 		expect(normalizeGrokCreditsBilling(null)).toBeNull();
 	});
+
+	test("treats an omitted proto3 percent as zero for a confirmed weekly period", () => {
+		const usage = normalizeGrokCreditsBilling({
+			config: {
+				currentPeriod: {
+					type: "USAGE_PERIOD_TYPE_WEEKLY",
+					start: "2026-08-19T02:30:16.863135+00:00",
+					end: "2026-08-26T02:30:16.863135+00:00",
+				},
+				billingPeriodStart: "2026-08-19T02:30:16.863135+00:00",
+				billingPeriodEnd: "2026-08-26T02:30:16.863135+00:00",
+				isUnifiedBillingUser: true,
+			},
+		});
+
+		expect(usage.creditUsagePercent).toBe(0);
+		expect(usage.products).toEqual([]);
+	});
+
+	test("keeps an omitted percent unknown when period bounds do not match", () => {
+		const usage = normalizeGrokCreditsBilling({
+			config: {
+				currentPeriod: {
+					type: "USAGE_PERIOD_TYPE_WEEKLY",
+					start: "2026-08-19T02:30:16.863135+00:00",
+					end: "2026-08-26T02:30:16.863135+00:00",
+				},
+				billingPeriodStart: "2026-08-01T00:00:00Z",
+				billingPeriodEnd: "2026-09-01T00:00:00Z",
+			},
+		});
+
+		expect(usage.creditUsagePercent).toBeNull();
+	});
 });
 
 describe("loadGrokAccountsFromPiAuth", () => {
-	const dir = join(tmpdir(), `codex-quota-grok-pi-${Date.now()}`);
+	const dir = join(tmpdir(), `shuvquota-grok-pi-${Date.now()}`);
 	const authPath = join(dir, "auth.json");
 
 	beforeEach(() => {
@@ -264,7 +298,7 @@ describe("loadGrokAccountsFromPiAuth", () => {
 });
 
 describe("loadGrokAccountsFromOpencodeAuth", () => {
-	const dir = join(tmpdir(), `codex-quota-grok-oc-${Date.now()}`);
+	const dir = join(tmpdir(), `shuvquota-grok-oc-${Date.now()}`);
 	const authPath = join(dir, "auth.json");
 
 	beforeEach(() => {
@@ -288,7 +322,7 @@ describe("loadGrokAccountsFromOpencodeAuth", () => {
 });
 
 describe("loadGrokAccountsFromHermesAuth", () => {
-	const dir = join(tmpdir(), `codex-quota-grok-hermes-${Date.now()}`);
+	const dir = join(tmpdir(), `shuvquota-grok-hermes-${Date.now()}`);
 	const authPath = join(dir, "auth.json");
 
 	beforeEach(() => {
@@ -380,7 +414,7 @@ describe("mergeGrokAccountCandidates", () => {
 });
 
 describe("loadAllGrokAccounts", () => {
-	const dir = join(tmpdir(), `codex-quota-grok-all-${Date.now()}`);
+	const dir = join(tmpdir(), `shuvquota-grok-all-${Date.now()}`);
 	const piPath = join(dir, "pi-auth.json");
 	const ocPath = join(dir, "oc-auth.json");
 
@@ -440,7 +474,7 @@ describe("sourceMatchesRotatedTokens", () => {
 });
 
 describe("persistGrokTokens fan-out", () => {
-	const dir = join(tmpdir(), `codex-quota-grok-persist-${Date.now()}`);
+	const dir = join(tmpdir(), `shuvquota-grok-persist-${Date.now()}`);
 	const piPath = join(dir, "pi.json");
 	const ocPath = join(dir, "oc.json");
 	const hermesPath = join(dir, "hermes.json");
@@ -546,7 +580,7 @@ describe("persistGrokTokens fan-out", () => {
 });
 
 describe("isGrokTokenExpiring and ensureFreshGrokToken", () => {
-	const dir = join(tmpdir(), `codex-quota-grok-fresh-${Date.now()}`);
+	const dir = join(tmpdir(), `shuvquota-grok-fresh-${Date.now()}`);
 	const piPath = join(dir, "pi.json");
 
 	beforeEach(() => {
@@ -770,7 +804,7 @@ describe("Grok help output", () => {
 	test("printHelpGrok mentions SuperGrok and fan-out", () => {
 		printHelpGrok();
 		const output = consoleOutput.join("\n");
-		expect(output).toContain("codex-quota");
+		expect(output).toContain("shuvquota");
 		expect(output).toContain("SuperGrok");
 		expect(output).toContain("refresh");
 	});

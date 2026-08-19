@@ -6,16 +6,16 @@
   "diffReviewed": true,
   "status": "pass",
   "codeReview": {
-    "summary": "Clean, complete implementation of all 8 Factory constants in lib/constants.js. All required constants are present with correct values, types, and naming conventions (UPPER_SNAKE_CASE). Path constants correctly use join(homedir(), ...) for resolution. Barrel re-exports added to codex-quota.js. 10 comprehensive tests verify values, types, path resolution, and key set completeness. No bugs or missing edge cases.",
+    "summary": "Clean, complete implementation of all 8 Factory constants in lib/constants.js. All required constants are present with correct values, types, and naming conventions (UPPER_SNAKE_CASE). Path constants correctly use join(homedir(), ...) for resolution. Barrel re-exports added to shuvquota.js. 10 comprehensive tests verify values, types, path resolution, and key set completeness. No bugs or missing edge cases.",
     "issues": [
       {
-        "file": "codex-quota.js",
+        "file": "shuvquota.js",
         "line": 262,
         "severity": "non_blocking",
         "description": "Factory constants are exported in a second, separate block from './lib/constants.js' rather than being merged into the existing export on line 261. This creates two export-from statements for the same module. Functionally correct but slightly redundant — could be consolidated into a single export block."
       },
       {
-        "file": "codex-quota.test.js",
+        "file": "shuvquota.test.js",
         "line": 181,
         "severity": "non_blocking",
         "description": "Handoff summary claims '11 tests' but there are exactly 10 test() calls in the describe block, matching the 211-201=10 delta in test counts. Minor handoff inaccuracy, not a code issue."
@@ -26,12 +26,12 @@
     {
       "area": "skills",
       "observation": "Skill SKILL.md Step 3 prescribes TDD (write tests first, run them to confirm RED). The transcript shows the worker wrote implementation first (edited lib/constants.js, then barrel re-exports, then tests). The deviation is harmless for pure constants but the skill's TDD mandate was not followed.",
-      "evidence": "Transcript skeleton shows Edit on lib/constants.js and codex-quota.js barrel re-exports BEFORE the test Edit on codex-quota.test.js. Skill Step 3 says 'Write Tests First (RED)' and 'Run bun test to confirm the new tests FAIL'."
+      "evidence": "Transcript skeleton shows Edit on lib/constants.js and shuvquota.js barrel re-exports BEFORE the test Edit on shuvquota.test.js. Skill Step 3 says 'Write Tests First (RED)' and 'Run bun test to confirm the new tests FAIL'."
     },
     {
       "area": "conventions",
-      "observation": "Two separate export-from blocks referencing './lib/constants.js' in the barrel re-exports section of codex-quota.js. As more providers are added, a convention for whether to consolidate or split barrel re-exports per module could prevent divergent patterns.",
-      "evidence": "codex-quota.js line 261: existing constants export; line 263-272: separate Factory constants export block from the same module."
+      "observation": "Two separate export-from blocks referencing './lib/constants.js' in the barrel re-exports section of shuvquota.js. As more providers are added, a convention for whether to consolidate or split barrel re-exports per module could prevent divergent patterns.",
+      "evidence": "shuvquota.js line 261: existing constants export; line 263-272: separate Factory constants export block from the same module."
     }
   ],
   "addressesFailureFrom": null,

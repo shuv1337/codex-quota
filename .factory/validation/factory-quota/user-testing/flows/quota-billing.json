@@ -2,7 +2,7 @@
   "groupId": "quota-billing",
   "testedAt": "2026-03-13T00:00:00.000Z",
   "isolation": {
-    "workingDirectory": "/home/shuv/repos/codex-quota",
+    "workingDirectory": "/home/shuv/repos/shuvquota",
     "services": "none",
     "accounts": "none configured — all testing uses unit tests with mocked data"
   },
@@ -90,7 +90,7 @@
       "evidence": {
         "testOutput": "factory-quota/quota-billing/VAL-QUOTA-004-billing-tests.txt",
         "consoleErrors": "none",
-        "sourceInspection": "lib/factory-usage.js computeBillingPeriod() handles clampDay, year boundaries. codex-quota.js parses --billing-day flag. lib/handlers.js passes flags.billingDay to fetchFactoryUsage."
+        "sourceInspection": "lib/factory-usage.js computeBillingPeriod() handles clampDay, year boundaries. shuvquota.js parses --billing-day flag. lib/handlers.js passes flags.billingDay to fetchFactoryUsage."
       },
       "issues": null
     },
@@ -100,22 +100,22 @@
       "status": "pass",
       "steps": [
         {
-          "action": "Run `node codex-quota.js factory quota --billing-day abc`",
+          "action": "Run `node shuvquota.js factory quota --billing-day abc`",
           "expected": "Error message about invalid billing day, exit code 1",
           "observed": "stderr: 'Error: Invalid --billing-day value: abc', exit code 1. ✅"
         },
         {
-          "action": "Run `node codex-quota.js factory quota --billing-day 0`",
+          "action": "Run `node shuvquota.js factory quota --billing-day 0`",
           "expected": "Error message about invalid billing day, exit code != 0",
           "observed": "Exit code 1 ✅. Error message is 'No Factory accounts found' (no accounts configured), not about invalid billing day. CLI parser accepts 0 as valid integer; range check is in computeBillingPeriod which runs after account loading. With accounts present, error would propagate."
         },
         {
-          "action": "Run `node codex-quota.js factory quota --billing-day -1`",
+          "action": "Run `node shuvquota.js factory quota --billing-day -1`",
           "expected": "Error message about invalid billing day, exit code != 0",
           "observed": "Exit code 1 ✅. Same as day=0: error is 'No Factory accounts found' in this environment. Function-level validation is correct."
         },
         {
-          "action": "Run `node codex-quota.js factory quota --billing-day 32`",
+          "action": "Run `node shuvquota.js factory quota --billing-day 32`",
           "expected": "Error message about invalid billing day, exit code != 0",
           "observed": "Exit code 1 ✅. Same as day=0: error is 'No Factory accounts found' in this environment. Function-level validation is correct."
         },

@@ -1,17 +1,17 @@
-# PLAN: Modularize & Deduplicate codex-quota
+# PLAN: Modularize & Deduplicate shuvquota
 
 ## Summary
 
-Break the monolithic 8K-line `codex-quota.js` into focused ESM modules under `lib/`, unify duplicated OpenAI/Claude token persistence patterns into shared generics, and eliminate dead code. The test file stays as a single file but re-points its imports at the new modules. The `codex-quota.js` entry point becomes a thin shell: imports, `main()`, CLI routing, and a barrel re-export for backward compatibility.
+Break the monolithic 8K-line `shuvquota.js` into focused ESM modules under `lib/`, unify duplicated OpenAI/Claude token persistence patterns into shared generics, and eliminate dead code. The test file stays as a single file but re-points its imports at the new modules. The `shuvquota.js` entry point becomes a thin shell: imports, `main()`, CLI routing, and a barrel re-export for backward compatibility.
 
 **Zero new dependencies.** All modules use Node.js built-ins only.
 
 ## Constraints
 
-- `package.json` `"bin"` still points at `./codex-quota.js` — it remains the entry point
+- `package.json` `"bin"` still points at `./shuvquota.js` — it remains the entry point
 - `package.json` `"files"` must be updated to include `lib/`
 - All 203 existing tests must pass after each phase
-- Published npm package must still work as a global CLI (`cq`, `codex-quota`)
+- Published npm package must still work as a global CLI (`cq`, `shuvquota`)
 - Each phase ends with a green test run and a commit
 
 ---
@@ -20,11 +20,11 @@ Break the monolithic 8K-line `codex-quota.js` into focused ESM modules under `li
 
 - [x] Create `lib/` directory and add a short module index checklist in this plan (module name → exported symbols)
 - [x] Add a temporary smoke script/command checklist for every phase:
-  - `node codex-quota.js --version`
-  - `node codex-quota.js --help`
-  - `node codex-quota.js codex quota --local`
-  - `node codex-quota.js claude quota --local`
-- [x] Confirm current export surface from `codex-quota.js` is captured (so barrel re-export parity is verifiable later)
+  - `node shuvquota.js --version`
+  - `node shuvquota.js --help`
+  - `node shuvquota.js codex quota --local`
+  - `node shuvquota.js claude quota --local`
+- [x] Confirm current export surface from `shuvquota.js` is captured (so barrel re-export parity is verifiable later)
 - [x] Commit: `chore: prep modularization guardrails and smoke checklist`
 
 ---
@@ -36,7 +36,7 @@ These modules have zero internal imports — they only use Node.js built-ins. Ex
 ### 1.1 — `lib/color.js`
 
 - [x] Create `lib/color.js`
-- [x] Move from `codex-quota.js` (lines 92–159):
+- [x] Move from `shuvquota.js` (lines 92–159):
   - Constants: `GREEN`, `RED`, `YELLOW`, `RESET`
   - Mutable: `noColorFlag` — keep as module-level `let`, export getter/setter
   - Functions: `setNoColorFlag`, `supportsColor`, `colorize`, `outputJson`, `getPackageVersion`
@@ -47,7 +47,7 @@ These modules have zero internal imports — they only use Node.js built-ins. Ex
 ### 1.2 — `lib/constants.js`
 
 - [x] Create `lib/constants.js`
-- [x] Move all top-level constants from `codex-quota.js` (lines 1–91, the block before Color output):
+- [x] Move all top-level constants from `shuvquota.js` (lines 1–91, the block before Color output):
   - OAuth config: `TOKEN_URL`, `AUTHORIZE_URL`, `CLIENT_ID`, `REDIRECT_URI`, `SCOPE`, `OAUTH_TIMEOUT_MS`, `OPENAI_OAUTH_REFRESH_BUFFER_MS`
   - Usage/JWT: `USAGE_URL`, `JWT_CLAIM`, `JWT_PROFILE`
   - Claude constants: `CLAUDE_CREDENTIALS_PATH`, `CLAUDE_MULTI_ACCOUNT_PATHS`, `CLAUDE_API_BASE`, `CLAUDE_ORIGIN`, `CLAUDE_ORGS_URL`, `CLAUDE_ACCOUNT_URL`, `CLAUDE_TIMEOUT_MS`, `CLAUDE_USER_AGENT`
@@ -61,7 +61,7 @@ These modules have zero internal imports — they only use Node.js built-ins. Ex
 ### 1.3 — `lib/jwt.js`
 
 - [x] Create `lib/jwt.js`
-- [x] Move from `codex-quota.js` (lines 161–190):
+- [x] Move from `shuvquota.js` (lines 161–190):
   - Functions: `decodeJWT`, `extractAccountId`, `extractProfile`
 - [x] Import `JWT_CLAIM`, `JWT_PROFILE` from `lib/constants.js`
 - [x] Exports: `{ decodeJWT, extractAccountId, extractProfile }`
@@ -70,7 +70,7 @@ These modules have zero internal imports — they only use Node.js built-ins. Ex
 ### 1.4 — `lib/fs.js`
 
 - [x] Create `lib/fs.js`
-- [x] Move from `codex-quota.js` (lines 225–275):
+- [x] Move from `shuvquota.js` (lines 225–275):
   - Functions: `resolveWritePath`, `writeFileAtomic`
 - [x] Exports: `{ resolveWritePath, writeFileAtomic }`
 - [x] Verify: `bun test` green
@@ -107,7 +107,7 @@ These modules have zero internal imports — they only use Node.js built-ins. Ex
 ### 2.1 — `lib/container.js`
 
 - [x] Create `lib/container.js`
-- [x] Move from `codex-quota.js` (lines 276–815, the Multi-account container helpers section):
+- [x] Move from `shuvquota.js` (lines 276–815, the Multi-account container helpers section):
   - `readMultiAccountContainer`
   - `buildMultiAccountPayload`
   - `writeMultiAccountContainer`
@@ -412,14 +412,14 @@ Currently `updateOpencodeAuth`, `updatePiAuth`, `updateOpencodeClaudeAuth`, `upd
 - [x] Exports: all handler functions
 - [x] Verify: `bun test` green
 
-### 7.2 — Slim down `codex-quota.js` entry point
+### 7.2 — Slim down `shuvquota.js` entry point
 
-- [x] `codex-quota.js` becomes ~50–80 lines:
+- [x] `shuvquota.js` becomes ~50–80 lines:
   - Shebang line
   - Imports from `lib/` modules
   - `main()` function (CLI arg parsing + routing to handlers)
   - `isMain` guard
-  - Barrel re-exports for `./codex-quota.js` import compatibility (tests + any external consumers)
+  - Barrel re-exports for `./shuvquota.js` import compatibility (tests + any external consumers)
 - [x] The barrel re-export block replaces the current 110-line export block — it re-exports everything from the lib modules so test imports don't break:
   ```js
   // Re-export everything for backward compatibility (tests, external consumers)
@@ -427,7 +427,7 @@ Currently `updateOpencodeAuth`, `updatePiAuth`, `updateOpencodeClaudeAuth`, `upd
   export { decodeJWT, extractAccountId, extractProfile } from "./lib/jwt.js";
   // ... etc for each module
   ```
-- [x] Verify: all test imports still resolve via `./codex-quota.js`
+- [x] Verify: all test imports still resolve via `./shuvquota.js`
 - [x] `bun test` green
 - [x] `cq --version`, `cq --help`, `cq codex quota`, `cq claude quota` all work
 
@@ -436,14 +436,14 @@ Currently `updateOpencodeAuth`, `updatePiAuth`, `updateOpencodeClaudeAuth`, `upd
 - [x] Add `"lib/"` to the `"files"` array so npm publish includes the modules:
   ```json
   "files": [
-    "codex-quota.js",
+    "shuvquota.js",
     "lib/",
     "README.md",
     "LICENSE"
   ]
   ```
 - [x] Update `scripts/preflight.js` to explicitly fail when `package.json.files` does not include `"lib/"`
-- [x] Add/adjust preflight unit tests in `codex-quota.test.js` for the new `"lib/"` requirement
+- [x] Add/adjust preflight unit tests in `shuvquota.test.js` for the new `"lib/"` requirement
 - [x] Verify: `bun run release:pack` (dry-run) includes all `lib/*.js` files
 
 ### Phase 7 checkpoint
@@ -461,14 +461,14 @@ This is optional but recommended for long-term maintainability. The barrel re-ex
 
 ### 8.1 — Migrate test imports
 
-- [x] Update `codex-quota.test.js` import block to import from specific `lib/` modules instead of `./codex-quota.js`:
+- [x] Update `shuvquota.test.js` import block to import from specific `lib/` modules instead of `./shuvquota.js`:
   ```js
   import { supportsColor, colorize, setNoColorFlag } from "./lib/color.js";
   import { decodeJWT, extractAccountId } from "./lib/jwt.js";
   import { generatePKCE, generateState, buildAuthUrl, ... } from "./lib/oauth.js";
   // etc.
   ```
-- [x] Keep the barrel re-exports in `codex-quota.js` for any external consumers
+- [x] Keep the barrel re-exports in `shuvquota.js` for any external consumers
 - [x] Verify: `bun test` green
 
 ### 8.2 — Add new tests for generics
@@ -498,9 +498,9 @@ This is optional but recommended for long-term maintainability. The barrel re-ex
 
 - [x] Update project structure section to reflect new `lib/` layout:
   ```
-  codex-quota/
-  ├── codex-quota.js         # Entry point, main(), barrel re-exports
-  ├── codex-quota.test.js    # Test suite
+  shuvquota/
+  ├── shuvquota.js         # Entry point, main(), barrel re-exports
+  ├── shuvquota.test.js    # Test suite
   ├── lib/
   │   ├── constants.js       # All config constants and path definitions
   │   ├── color.js           # Terminal color output helpers
@@ -550,7 +550,7 @@ This is optional but recommended for long-term maintainability. The barrel re-ex
 ## Final module dependency graph
 
 ```
-codex-quota.js (entry)
+shuvquota.js (entry)
   ├── lib/constants.js
   ├── lib/color.js ← constants
   ├── lib/jwt.js ← constants
@@ -581,7 +581,7 @@ No circular dependencies. `lib/token-match.js` has zero internal deps (pure logi
 
 ## Risk notes
 
-- **Barrel re-exports keep backward compat** — any external code importing from `./codex-quota.js` continues to work unchanged. Tests can be migrated incrementally.
+- **Barrel re-exports keep backward compat** — any external code importing from `./shuvquota.js` continues to work unchanged. Tests can be migrated incrementally.
 - **Each phase is independently committable** — if something goes sideways, revert one phase without losing the others.
 - **The `files` array in package.json is critical** — forgetting `"lib/"` would publish a broken package. Keep the new explicit preflight check for this as a release gate.
 - **Prompt helper extraction (`promptConfirm` / `promptInput`)** touches interactive flows (`claude add`, `claude reauth`, import prompts, remove confirmations). Keep focused smoke checks for TTY behavior and non-interactive safety.

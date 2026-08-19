@@ -88,7 +88,7 @@
     {
       "featureId": "factory-quota-handlers",
       "severity": "non_blocking",
-      "description": "Duplicate billing-day index computation in codex-quota.js main() (billingDayIdx vs billingDayArgIdx)."
+      "description": "Duplicate billing-day index computation in shuvquota.js main() (billingDayIdx vs billingDayArgIdx)."
     },
     {
       "featureId": "factory-quota-handlers",
@@ -101,7 +101,7 @@
     {
       "target": "AGENTS.md",
       "suggestion": "Document the flag-with-value parsing pattern in main(). Currently --billing-day N requires manual indexOf + Set exclusion logic. If more flags-with-values are added (e.g., --output-format, --timeout), a general parsing utility or documented pattern should be established.",
-      "evidence": "codex-quota.js lines 52-60 (billingDayIdx parsing) and 74-80 (flagsWithValues set). factory-quota-handlers review noted this will become unwieldy with more such flags.",
+      "evidence": "shuvquota.js lines 52-60 (billingDayIdx parsing) and 74-80 (flagsWithValues set). factory-quota-handlers review noted this will become unwieldy with more such flags.",
       "isSystemic": false
     },
     {

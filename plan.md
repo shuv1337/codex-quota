@@ -11,7 +11,7 @@
 - Codex write paths that must preserve root metadata and unknown fields: `handleAdd`, `handleRemove`, `persistOpenAiOAuthTokens`.
 - Claude write paths that must preserve root metadata and unknown fields: `handleClaudeRemove`, `persistClaudeOAuthTokens`.
 - `findAccountByLabel()` depends on `loadAllAccounts()`, which deduplicates by email. That can drop valid labels when the same email spans multiple workspaces. Active label resolution and switching must not depend on email deduplication.
-- Codex active detection currently relies on JWT decode and `codex_quota_label`. Divergence detection should prefer `tokens.account_id` when present.
+- Codex active detection currently relies on JWT decode and `shuvquota_label`. Divergence detection should prefer `tokens.account_id` when present.
 - Claude does not have a stable `accountId` in the current model. Claude divergence detection must use token matching and degrade gracefully when only session-key credentials exist.
 
 ## Current State (Summary)
@@ -23,7 +23,7 @@
 - pi auth path: `~/.pi/agent/auth.json` (supports both providers).
 - The `switch` command already pushes tokens to all detected CLI auth files.
 - No tracking of which account is "active" in the multi-account files.
-- Native CLI logins (e.g., `codex auth`) can diverge from codex-quota managed state.
+- Native CLI logins (e.g., `codex auth`) can diverge from shuvquota managed state.
 
 ## Proposed Data Model
 
@@ -81,10 +81,10 @@ The multi-account file (`~/.codex-accounts.json` or `~/.claude-accounts.json`) i
 - Active label resolution and switching must use a no-dedup path. Email-based deduplication remains display-only.
 
 ### Legacy marker coexistence and guarded migration
-- Continue writing `codex_quota_label` into `~/.codex/auth.json` for compatibility.
-- If `activeLabel` is missing but `codex_quota_label` is present, attempt migration on first write with an accountId guard.
+- Continue writing `shuvquota_label` into `~/.codex/auth.json`.
+- If `activeLabel` is missing but a managed label marker is present, attempt migration on first write with an accountId guard. Read the legacy marker for compatibility.
 - Migration guard step: resolve the CLI accountId by preferring `tokens.account_id` and falling back to JWT decode.
-- Migration guard step: resolve the label from `codex_quota_label` via a no-dedup label lookup.
+- Migration guard step: resolve the managed label via a no-dedup label lookup.
 - Migration guard step: only persist `activeLabel` when the label resolves and the accountId matches the CLI accountId.
 - If the guard fails, do not migrate; instead treat it as divergence and warn.
 
@@ -114,7 +114,7 @@ Warning: CLI auth diverged from activeLabel
   Active: work (acc_xxx)
   CLI:    personal (acc_yyy)
 
-Run 'codex-quota codex sync' to push active account to CLI.
+Run 'shuvquota codex sync' to push active account to CLI.
 ```
 
 ### Claude divergence detection (token-based)
@@ -135,7 +135,7 @@ How to detect:
 2. Refresh token if needed (existing).
 3. Update `activeLabel` in the multi-account source of truth using container-preserving writes.
 4. Push tokens to CLI auth files (existing).
-5. Continue writing `codex_quota_label` for Codex.
+5. Continue writing `shuvquota_label` for Codex.
 
 ### On `add`
 - Preserve unknown root fields and root shape when writing.
@@ -157,7 +157,7 @@ How to detect:
 ### On `remove`
 - If removing the account matching `activeLabel`, set `activeLabel` to `null`.
 - Do not drop root metadata or unknown root fields.
-- For Codex, only clear `codex_quota_label` when the CLI accountId matches the removed account.
+- For Codex, only clear managed label markers when the CLI accountId matches the removed account.
 
 ## CLI Enhancements
 
@@ -167,8 +167,8 @@ Bi-directional sync for the `activeLabel` account:
 2. Pull (reverse-sync): if a CLI store (e.g., OpenCode) has the same refresh token but a newer access token / expiry, pull that token back into the multi-account file.
 
 ```
-codex-quota codex sync [options]
-codex-quota claude sync [options]
+shuvquota codex sync [options]
+shuvquota claude sync [options]
 ```
 
 Flags:
@@ -178,7 +178,7 @@ Flags:
 Use cases:
 - Re-sync after manual edits to CLI auth files
 - Fix divergence after native CLI login
-- Pull freshly refreshed tokens from OpenCode back into codex-quota (reverse-sync)
+- Pull freshly refreshed tokens from OpenCode back into shuvquota (reverse-sync)
 - Verify sync state without running switch
 
 Notes:
@@ -242,7 +242,7 @@ Output (JSON):
 - `activeLabel` updates on switch.
 - `activeLabel` clears when removing the active account.
 - Codex divergence detection prefers `tokens.account_id` over JWT decode.
-- Guarded migration: `codex_quota_label` migrates only when accountId matches CLI accountId.
+- Guarded migration: the managed label migrates only when accountId matches CLI accountId.
 - Unknown root fields are preserved when writing multi-account files.
 - `schemaVersion` is written and preserved.
 - Container shape is preserved where possible (array vs object).
@@ -272,7 +272,7 @@ Output (JSON):
 
 4. Implement `activeLabel` updates on switch using the source of truth container. Codex: update `handleSwitch` to set `activeLabel` after a successful refresh and before syncing tokens. Claude: update `handleClaudeSwitch` similarly, while skipping env-sourced accounts.
 
-5. Implement divergence detection helpers with provider-specific logic. Codex: read CLI accountId by preferring `tokens.account_id`, falling back to JWT decode, and add guarded migration from `codex_quota_label` to `activeLabel` using the accountId match guard. Claude: implement token-based divergence detection that prefers refresh-token matching, falls back to access-token matching, and skips session-key-only accounts.
+5. Implement divergence detection helpers with provider-specific logic. Codex: read CLI accountId by preferring `tokens.account_id`, falling back to JWT decode, and add guarded migration from the managed label to `activeLabel` using the accountId match guard. Claude: implement token-based divergence detection that prefers refresh-token matching, falls back to access-token matching, and skips session-key-only accounts.
 
 6. Implement the `sync` subcommand with bi-directional support. Add `handleCodexSync(args, flags)` and `handleClaudeSync(args, flags)`:
    - Resolve the activeLabel account from the source of truth container using no-dedup lookup.
@@ -290,4 +290,4 @@ Output (JSON):
 - Existing files without these fields will be upgraded on first write.
 - No breaking changes to account structure.
 - `sync` is additive; existing switch behavior is preserved.
-- Migration guard: if `codex_quota_label` exists and `activeLabel` is missing, only migrate when the CLI accountId matches the label's accountId.
+- Migration guard: if a managed label exists and `activeLabel` is missing, only migrate when the CLI accountId matches the label's accountId.
